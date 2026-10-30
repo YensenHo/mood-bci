@@ -17,6 +17,8 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 from PySide6.QtCore import QTimer
 from PySide6.QtWidgets import QApplication
 
+import numpy as np
+
 from eegscope.app import MainWindow
 from eegscope.config import load_config
 from eegscope.sources import make_source
@@ -59,12 +61,43 @@ def main() -> int:
     print(f"[GUI smoke] 脑地形图热力图 shape={topo_img.shape}，"
           f"质量面板标签 {len(q_labels)} 个 OK")
 
+    # 校验时频图面板已建窗并随分析节奏更新（不崩），且 alpha 带可见
+    assert hasattr(win, "spectrogram"), "主窗口缺少时频图面板"
+    assert win.spectrogram.img.image is not None, "时频图面板未渲染图像"
+    assert win.spectrogram.img.image.ndim == 2, \
+        f"时频图应为 2D 图，实际 {win.spectrogram.img.image.shape}"
+    assert win.spectrogram._freqs is not None and win.spectrogram._logpower is not None
+    freq = win.spectrogram._freqs
+    logp = win.spectrogram._logpower
+    alpha_band = float(logp[(freq >= 8.0) & (freq <= 13.0)].mean())
+    hi_band = float(logp[(freq >= 30.0) & (freq <= 45.0)].mean())
+    print(f"[GUI smoke] 时频图 image shape={win.spectrogram.img.image.shape}, "
+          f"alpha带(8-13Hz) log10功率={alpha_band:.3f} vs 高频带(30-45Hz)={hi_band:.3f}")
+    assert alpha_band > hi_band, "合成源枕区 alpha 应使 8-13Hz 带比 30-45Hz 带更亮"
+
+    # 50Hz 陷波验证：全频段时频谱里 50Hz 处功率应被压到很弱（工频线被陷波移除）
+    f_full = win.spectrogram._freqs_full
+    lp_full = win.spectrogram._logpower_full
+    i50 = int(np.argmin(np.abs(f_full - 50.0)))
+    p50 = float(lp_full[i50, :].mean())
+    print(f"[GUI smoke] 50Hz 陷波: 滤后全频段时频谱 50Hz 处 log10功率={p50:.3f} "
+          f"(原始工频≈+1.8，陷波后应很弱)")
+    assert p50 < 0.0, f"50Hz 工频应被陷波压掉，实际 log10 功率 {p50:.3f}"
+
     # 模拟闭眼按钮再跑 2 秒，验证 alpha 上升后 FAA 面板仍正常刷新
     win.eyes_btn.setChecked(True)
     for _ in range(int(2.0 * 1000 / cfg.viz.refresh_ms)):
         win._tick()
     app.processEvents()
     print(f"[GUI smoke] 模拟闭眼后 FAA 面板文本: {win.emotion.faa_label.text()!r}")
+
+    # 闭眼后 alpha 带应更亮（时频图上 10Hz 横带变亮）
+    freq_c = win.spectrogram._freqs
+    logp_c = win.spectrogram._logpower
+    alpha_c = float(logp_c[(freq_c >= 8.0) & (freq_c <= 13.0)].mean())
+    print(f"[GUI smoke] 闭眼后 alpha带 log10功率={alpha_c:.3f} "
+          f"(闭眼前 {alpha_band:.3f}，应上升)")
+    assert alpha_c > alpha_band, "模拟闭眼后时频图 alpha 带应更亮"
 
     win.close()
     print("[GUI smoke] 退出 OK")

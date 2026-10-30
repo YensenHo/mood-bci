@@ -13,8 +13,8 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel,
 from .analysis import EmotionAnalyzer, band_power_map, welch_psd
 from .dsp import SignalChain
 from .recorder import SessionRecorder, config_snapshot
-from .viz import (EmotionPanel, QualityPanel, SpectrumPanel, TopographyPanel,
-                  WaveformPanel, setup_theme)
+from .viz import (EmotionPanel, QualityPanel, SpectrogramPanel, SpectrumPanel,
+                  TopographyPanel, WaveformPanel, setup_theme)
 
 # 录制输出根目录（software/recordings/，与 CWD 无关）
 _RECORDINGS_DIR = os.path.join(os.path.dirname(os.path.dirname(
@@ -75,7 +75,7 @@ class MainWindow(QMainWindow):
         left_layout.addWidget(self.quality, stretch=0)
         splitter.addWidget(left)
 
-        # 右列：频谱 + 情绪 + 脑地形图
+        # 右列：频谱 + 情绪 + 脑地形图 + 时频图
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
@@ -83,9 +83,13 @@ class MainWindow(QMainWindow):
         self.emotion = EmotionPanel(self.cfg.analysis.bands)
         self.topography = TopographyPanel(self.source.channel_names,
                                           self.cfg.analysis.bands)
+        self.spectrogram = SpectrogramPanel(self.source.channel_names,
+                                            self.cfg.sample_rate,
+                                            window_seconds=10.0)
         right_layout.addWidget(self.spectrum, stretch=2)
         right_layout.addWidget(self.emotion, stretch=2)
         right_layout.addWidget(self.topography, stretch=3)
+        right_layout.addWidget(self.spectrogram, stretch=3)
         splitter.addWidget(right)
 
         splitter.setStretchFactor(0, 3)
@@ -269,6 +273,12 @@ class MainWindow(QMainWindow):
         for bname, (blo, bhi) in self.cfg.analysis.bands.items():
             band_powers[bname] = band_power_map(data, self.cfg.sample_rate, blo, bhi)
         self.topography.update_band_powers(band_powers)
+
+        # 时频图：取面板下拉选中的通道，喂最近 window_seconds 秒（约 10s）滤波数据
+        sp_idx = self.spectrogram.selected_channel_index()
+        sp_win = int(self.spectrogram.window_sec * self.cfg.sample_rate)
+        sp_data = hist[sp_idx, -min(hist.shape[1], sp_win):]
+        self.spectrogram.update_spectrogram(sp_data)
 
         # 信号质量：用当前分析窗（滤波后）逐通道打绿/黄/红
         self.quality.update_quality(data)

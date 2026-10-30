@@ -10,6 +10,7 @@ from PySide6.QtGui import QFont, QPolygonF
 from PySide6.QtWidgets import (QComboBox, QGraphicsPolygonItem, QHBoxLayout,
                                QLabel, QVBoxLayout, QWidget)
 from scipy.interpolate import griddata
+from scipy.signal import spectrogram
 
 from .analysis import band_power_map, welch_psd
 
@@ -550,4 +551,139 @@ class QualityPanel(QWidget):
             if r["reasons"]:
                 tip = "；".join(r["reasons"])
             lbl.setToolTip(f"RMS={r['rms']:.1f}µV · {tip}")
+
+
+# =====================================================================
+# 时频图
+# =====================================================================
+
+class SpectrogramPanel(QWidget):
+    """时频图面板：单个选定通道最近一段滤波数据的 STFT 时频谱。
+
+    - x 轴 = 时间（秒，最新样本在 0，与波形面板一致，滚动窗为最近
+      `window_seconds` 秒）；y 轴 = 频率（0~`freq_max`，默认 45Hz）；
+      颜色 = log10 功率谱密度（µV²/Hz），用 magma colormap（与脑地形图一致）。
+    - 顶部自带通道下拉，选择看哪个通道的时频图。
+    - `update_spectrogram(channel_data_1d, fs=None)` 接收该通道最近一段滤波数据（1D），
+      用 `scipy.signal.spectrogram`（STFT 幅度平方，mode='psd'）算时频谱并刷新。
+      面板只负责计算+渲染，喂数据由 `app._run_analysis` 按约 500ms 节奏驱动。
+      方法名带 `_spectrogram` 后缀以避开 `QWidget.update()`（沿用本项目既有约定）。
+    - 显示电平用**固定** log10 范围 `_LEVELS`（不逐帧自适应归一化），这样
+      「模拟闭眼 → alpha 功率上升」会表现为 10Hz 横带真实变亮，而非被归一化抵消。
+    """
+
+    _LEVELS = (-3.0, 3.0)   # log10(µV²/Hz) 显示范围（固定）
+    _EPS = 1e-12
+
+    def __init__(self, channel_names, fs, window_seconds=10.0, freq_max=45.0):
+        super().__init__()
+        self.names = [str(c) for c in channel_names]
+        self.fs = float(fs)
+        self.window_sec = float(window_seconds)
+        self.freq_max = float(freq_max)
+
+        # 最近一次 STFT 结果（供测试/调试读取；全频段 + 裁剪后两份）
+        self._freqs_full = None      # 全频段频率轴（0~fs/2）
+        self._logpower_full = None   # 全频段 log10 功率 (n_freq, n_time)
+        self._freqs = None           # 裁剪到 [0, freq_max] 的频率轴
+        self._logpower = None        # 裁剪后 log10 功率 (n_freq, n_time)
+        self._t = None               # 各段时间中心（相对窗口起点，秒）
+
+        layout = QVBoxLayout(self)
+        layout.setContentsMargins(8, 8, 8, 8)
+        layout.setSpacing(4)
+
+        head = QHBoxLayout()
+        title = QLabel("时频图（单通道）")
+        title.setStyleSheet("font-weight: bold; font-size: 14px; color: #e0e0e0;")
+        head.addWidget(title)
+        head.addStretch(1)
+        head.addWidget(QLabel("通道"))
+        self.ch_combo = QComboBox()
+        self.ch_combo.addItems(self.names)
+        # 默认看枕区通道（合成源 alpha 最强），找不到则第 0 通道
+        default = 0
+        for pref in ("O1", "O2", "Oz", "OZ"):
+            for i, nm in enumerate(self.names):
+                if nm.upper() == pref:
+                    default = i
+                    break
+            else:
+                continue
+            break
+        self.ch_combo.setCurrentIndex(default)
+        head.addWidget(self.ch_combo)
+        layout.addLayout(head)
+
+        self.plot = pg.PlotWidget()
+        self.plot.setLabel("bottom", "时间", units="s")
+        self.plot.setLabel("left", "频率", units="Hz")
+        self.plot.showGrid(x=True, y=True, alpha=0.15)
+        self.plot.setXRange(-self.window_sec, 0.0, padding=0)
+        self.plot.setYRange(0.0, self.freq_max, padding=0)
+        layout.addWidget(self.plot, stretch=1)
+
+        self.img = pg.ImageItem()
+        self.img.setLookupTable(_topo_lut("magma"))
+        self.plot.addItem(self.img)
+
+        # 颜色条（log10 功率，固定范围）
+        try:
+            self.colorbar = pg.ColorBarItem(
+                values=self._LEVELS, colorMap=pg.colormap.get("magma"),
+                width=12, label="log10(µV²/Hz)")
+            self.colorbar.setImageItem(self.img)
+            self.plot.getPlotItem().layout.addItem(self.colorbar, 2, 3)
+        except Exception:
+            self.colorbar = None
+
+    # ---- 查询 ----
+    def selected_channel_index(self) -> int:
+        """当前下拉选中的通道索引（越界钳制到合法范围）。"""
+        i = self.ch_combo.currentIndex()
+        return max(0, min(i, len(self.names) - 1))
+
+    # ---- 数据入口 ----
+    def update_spectrogram(self, channel_data_1d, fs=None) -> None:
+        """用该通道最近一段滤波数据（1D）算 STFT 并刷新。
+
+        `fs` 可选（默认用构造时采样率）；数据过短时保持上一帧图像不报错。
+        """
+        x = np.asarray(channel_data_1d, dtype=np.float64).ravel()
+        if fs is not None:
+            self.fs = float(fs)
+        fs = self.fs
+        n = x.size
+        if n < 32:
+            return  # 数据不足，保持上一帧
+
+        nperseg = int(max(16, min(256, n)))
+        noverlap = int(nperseg * 0.75)
+        if noverlap >= nperseg:
+            noverlap = nperseg - 1
+
+        f, t, sxx = spectrogram(x, fs=fs, nperseg=nperseg, noverlap=noverlap,
+                                detrend="constant", mode="psd")
+        logp = np.log10(np.maximum(sxx, self._EPS))
+        self._freqs_full = np.asarray(f, dtype=np.float64)
+        self._logpower_full = np.asarray(logp, dtype=np.float64)
+        self._t = np.asarray(t, dtype=np.float64)
+
+        # 裁剪到 [0, freq_max]
+        m = f <= self.freq_max
+        f_c = np.asarray(f[m], dtype=np.float64)
+        logp_c = logp[m, :]
+        if f_c.size < 2:
+            return
+        self._freqs = f_c
+        self._logpower = np.asarray(logp_c, dtype=np.float64)
+
+        # 相对时间：最新样本 = 0（与波形面板一致）
+        dur = n / fs
+        t_rel = self._t - dur
+        img = np.ascontiguousarray(logp_c[::-1, :])  # 行 0 = 最高频（画在顶部）
+        self.img.setImage(img, levels=self._LEVELS, autoLevels=False)
+        self.img.setRect(QRectF(float(t_rel[0]), float(f_c[0]),
+                                float(t_rel[-1] - t_rel[0]),
+                                float(f_c[-1] - f_c[0])))
 

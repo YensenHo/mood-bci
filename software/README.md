@@ -5,7 +5,9 @@
 - **SyntheticSource**：合成真实感脑电（无需任何硬件），用于先验证整条链路 + 软件功能。
 - **OpenBCISource**：OpenBCI 兼容 ADS1299 板的串口驱动（8ch/16ch），接真实硬件用。
 
-实时显示多通道滚动波形、频谱、情绪指标（FAA 额叶偏侧化 + 分频带功率）。接真实硬件时
+实时显示多通道滚动波形、频谱、时频图、情绪指标（FAA 额叶偏侧化 + 分频带功率）、
+脑地形图、信号质量，并提供会话录制（标记）→ 离线分析（FAA/频带功率 + ERP 锁时叠加
+平均）链路。接真实硬件时
 只需把 `config.yaml` 的 `source.type` 改成 `openbci` 并填串口号，DSP / 分析 / 可视化
 一行不用改。
 
@@ -25,9 +27,11 @@ software/
     test_openbci_parser.py  # OpenBCI 帧解析器单元测试（无需硬件）
     capture_serial.py    # 抓串口原始字节，验证真实硬件协议
     analyze_session.py   # 离线分析 CLI：对录制目录算时间分辨 FAA/频带功率
+    analyze_erp.py       # ERP 离线分析 CLI：锁时叠加平均（读 markers 时间）
     test_isc.py          # ISC 合成数据自检（前段高同步 / 后段独立噪声可区分）
     test_recording.py    # headless 冒烟：录制→落盘→离线分析全链路
     test_topo_quality.py # headless：脑地形图频带功率 + 信号质量 + 插值自检
+    test_erp.py          # headless：ERP 叠加平均恢复锁时信号 + 越界跳过自检
   eegscope/
     __init__.py
     config.py            # 读并校验 config.yaml（dataclass）
@@ -40,7 +44,8 @@ software/
     analysis.py          # FAA + 分频带功率（Welch），含 F3/F4 缺失降级
     recorder.py          # 会话录制：内存缓冲 raw/filtered，停止落盘 session.npz + meta.json
     isc.py               # 跨被试同步 ISC（同导联两两皮尔逊相关，滑窗）
-    viz.py               # pyqtgraph 面板：堆叠波形 / 频谱 / 情绪指标 / 脑地形图 / 信号质量（暗色主题）
+    erp.py               # ERP 事件相关电位：锁时叠加平均 compute_erp
+    viz.py               # pyqtgraph 面板：堆叠波形 / 频谱 / 情绪指标 / 脑地形图 / 信号质量 / 时频图（暗色主题）
     app.py               # Qt 主窗口 + 定时器，把 source→dsp→analysis→viz 串起来
 ```
 
@@ -174,6 +179,23 @@ env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPAT
 「● 正常 ● 可疑 ● 坏」；鼠标悬停标签可看具体原因（RMS 值 + 命中项）。合成源正常
 通道全绿，注入平线/饱和通道后标红。两个面板只看数据、不看源类型，真实硬件下照常工作。
 
+## 时频图（SpectrogramPanel）
+
+右列底部「时频图（单通道）」面板对**单个选定通道**最近一段滤波数据算 STFT 时频谱：
+
+- 顶部下拉选看哪个通道（默认枕区 O1，合成源 alpha 最强）；x 轴=时间（秒，最新样本
+  在 0）、y 轴=频率（0~45Hz）、颜色=log10 功率谱密度（µV²/Hz），用 magma colormap
+  （与脑地形图一致）。用 `scipy.signal.spectrogram`（STFT 幅度平方，`mode='psd'`），
+  nperseg≤256、75% 重叠。
+- 由 `app._run_analysis` 按约 500ms 节奏喂最近 10s 滤波数据刷新（面板方法
+  `update_spectrogram(channel_data_1d, fs=None)`，后缀避开 `QWidget.update()`）。
+- 显示电平用**固定** log10 范围 [-3, 3]（不逐帧自适应归一化），所以合成源下：
+  - alpha 显示成一条 ~10Hz 的亮横带；点「模拟闭眼」alpha 功率上升，这条带明显变亮
+    （`gui_smoke.py` 断言闭眼前后 8-13Hz 带 log10 功率上升）。
+  - 50Hz 工频经带通+陷波后已很弱：全频段时频谱上 50Hz 处从原始 log10≈+1.8 被压到
+    ≈-0.3（`gui_smoke.py` 断言 <0），正好验证信号链（陷波移除工频线）。
+- 面板只看数据、不看源类型，真实硬件下照常工作。
+
 ## 冒烟验证（无 GUI）
 
 ```bash
@@ -282,6 +304,53 @@ env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPAT
     .venv/bin/python scripts/test_isc.py
 ```
 
+
+## ERP（事件相关电位，锁时叠加平均）
+
+ERP 是把刺激诱发的锁时脑电信号从自发脑电/噪声里捞出来的经典方法。单试次 ERP 信噪
+比极低（诱发信号常远小于背景脑电），但噪声相位随机、锁时信号相位恒定，把 N 个
+同刺激试次按事件时刻对齐后**平均**，噪声以 1/√N 衰减而信号保持不变。
+
+`eegscope/erp.py` 提供：
+
+```python
+from eegscope.erp import compute_erp
+times, erp = compute_erp(data, fs, event_times, tmin=-0.2, tmax=0.8)
+```
+
+- `data`：`(n_ch, n)` 滤波后 µV；`event_times`：事件时刻列表（秒，从 `meta.json`
+  的 `markers[].time_s` 取）。
+- 每个事件截 `[tmin, tmax]` 的 epoch，**基线校正**（减 `[tmin, 0]` 段均值），累加
+  后除以事件数得平均 ERP（每通道一条）。返回 `times`(长度=(tmax−tmin)·fs) 和
+  `erp`(n_ch, len(times))。
+- 事件太靠近数据两端导致 epoch 越界的，**跳过该事件不报错**；有效事件数为 0 时抛
+  `ValueError` 并给清晰提示。
+
+离线分析 CLI（headless，读 markers 时间做叠加平均，写 `erp.npz` + `erp_report.md`）：
+
+```bash
+cd ~/mood_BCI/software
+env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPATH= \
+    .venv/bin/python scripts/analyze_erp.py recordings/<YYYYmmdd_HHMMSS> \
+        --tmin -0.2 --tmax 0.8
+```
+
+- 用 `SignalChain` 对 `raw` 重新滤波（口径同 `analyze_session.py`），取 markers
+  时间做 `compute_erp`；写 `erp.npz`（times + erp + channel_names + n_events）。
+- `erp_report.md`：每通道 ERP 峰值潜伏期(ms)/峰幅(µV)、事件数、基线窗，以及
+  「单试次信噪比低、需多次叠加平均」的诚实说明。
+- **留给以后接真实刺激标记的接口**：`compute_erp` 只要求 `event_times` 与刺激 onset
+  锁时对齐；接真实刺激设备时，把设备的 trigger 时间戳（秒）直接喂进 `event_times`
+  即可（现在 GUI「标记」按钮写进 markers 的 `time_s` 就是这个接口的落点）。
+
+合成数据自检（50 个事件、+10µV@300ms 已知波形 + 30µV 单试次噪声，验证叠加平均
+恢复锁时信号 + 越界事件跳过）：
+
+```bash
+cd ~/mood_BCI/software
+env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPATH= \
+    .venv/bin/python scripts/test_erp.py
+```
 
 ## 真实硬件（OpenBCI 兼容 ADS1299 板）
 
