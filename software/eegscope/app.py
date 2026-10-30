@@ -10,10 +10,11 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel,
                                QMainWindow, QPushButton, QSlider, QSplitter,
                                QVBoxLayout, QWidget)
 
-from .analysis import EmotionAnalyzer, welch_psd
+from .analysis import EmotionAnalyzer, band_power_map, welch_psd
 from .dsp import SignalChain
 from .recorder import SessionRecorder, config_snapshot
-from .viz import EmotionPanel, SpectrumPanel, WaveformPanel, setup_theme
+from .viz import (EmotionPanel, QualityPanel, SpectrumPanel, TopographyPanel,
+                  WaveformPanel, setup_theme)
 
 # 录制输出根目录（software/recordings/，与 CWD 无关）
 _RECORDINGS_DIR = os.path.join(os.path.dirname(os.path.dirname(
@@ -59,24 +60,37 @@ class MainWindow(QMainWindow):
         root.addLayout(self._build_controls())
 
         splitter = QSplitter(Qt.Orientation.Horizontal)
+
+        # 左列：波形 + 信号质量（质量标签对齐波形通道）
+        left = QWidget()
+        left_layout = QVBoxLayout(left)
+        left_layout.setContentsMargins(0, 0, 0, 0)
+        left_layout.setSpacing(4)
         self.waveform = WaveformPanel(
             self.source.n_channels, self.source.channel_names,
             self.cfg.viz.window_seconds, self.cfg.sample_rate,
             self.cfg.viz.channel_spacing_uv)
-        splitter.addWidget(self.waveform)
+        self.quality = QualityPanel(self.source.channel_names, self.cfg.sample_rate)
+        left_layout.addWidget(self.waveform, stretch=1)
+        left_layout.addWidget(self.quality, stretch=0)
+        splitter.addWidget(left)
 
+        # 右列：频谱 + 情绪 + 脑地形图
         right = QWidget()
         right_layout = QVBoxLayout(right)
         right_layout.setContentsMargins(0, 0, 0, 0)
         self.spectrum = SpectrumPanel(self.cfg.sample_rate, self.cfg.analysis.bands)
         self.emotion = EmotionPanel(self.cfg.analysis.bands)
-        right_layout.addWidget(self.spectrum, stretch=3)
-        right_layout.addWidget(self.emotion, stretch=4)
+        self.topography = TopographyPanel(self.source.channel_names,
+                                          self.cfg.analysis.bands)
+        right_layout.addWidget(self.spectrum, stretch=2)
+        right_layout.addWidget(self.emotion, stretch=2)
+        right_layout.addWidget(self.topography, stretch=3)
         splitter.addWidget(right)
 
         splitter.setStretchFactor(0, 3)
         splitter.setStretchFactor(1, 2)
-        splitter.setSizes([800, 380])
+        splitter.setSizes([750, 420])
         root.addWidget(splitter, stretch=1)
 
     def _build_controls(self):
@@ -249,6 +263,15 @@ class MainWindow(QMainWindow):
         ch_idx = max(0, min(self.ch_selector.currentIndex(), data.shape[0] - 1))
         freqs, psd = welch_psd(data[ch_idx], self.cfg.sample_rate)
         self.spectrum.update_psd(freqs, psd)
+
+        # 脑地形图：对每个频带算「每通道频带功率」，推给面板（面板按当前选中频带渲染）
+        band_powers = {}
+        for bname, (blo, bhi) in self.cfg.analysis.bands.items():
+            band_powers[bname] = band_power_map(data, self.cfg.sample_rate, blo, bhi)
+        self.topography.update_band_powers(band_powers)
+
+        # 信号质量：用当前分析窗（滤波后）逐通道打绿/黄/红
+        self.quality.update_quality(data)
 
         if metrics.get("faa_ok"):
             self.info_label.setText(f"FAA {disp['faa']:+.3f}  "

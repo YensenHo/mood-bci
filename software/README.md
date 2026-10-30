@@ -27,6 +27,7 @@ software/
     analyze_session.py   # 离线分析 CLI：对录制目录算时间分辨 FAA/频带功率
     test_isc.py          # ISC 合成数据自检（前段高同步 / 后段独立噪声可区分）
     test_recording.py    # headless 冒烟：录制→落盘→离线分析全链路
+    test_topo_quality.py # headless：脑地形图频带功率 + 信号质量 + 插值自检
   eegscope/
     __init__.py
     config.py            # 读并校验 config.yaml（dataclass）
@@ -39,7 +40,7 @@ software/
     analysis.py          # FAA + 分频带功率（Welch），含 F3/F4 缺失降级
     recorder.py          # 会话录制：内存缓冲 raw/filtered，停止落盘 session.npz + meta.json
     isc.py               # 跨被试同步 ISC（同导联两两皮尔逊相关，滑窗）
-    viz.py               # pyqtgraph 面板：堆叠波形 / 频谱 / 情绪指标（暗色主题）
+    viz.py               # pyqtgraph 面板：堆叠波形 / 频谱 / 情绪指标 / 脑地形图 / 信号质量（暗色主题）
     app.py               # Qt 主窗口 + 定时器，把 source→dsp→analysis→viz 串起来
 ```
 
@@ -141,6 +142,38 @@ env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPAT
 > alpha 增强后，FAA 会回落到接近 0 的稳定中性值。情绪面板在攒满一个分析窗（默认 2s）
 > 后才开始出数。
 
+## 脑地形图（TopographyPanel）
+
+右侧「脑地形图（频带功率）」面板把当前分析窗的**每通道频带功率**画成 10-20 头部
+俯视热力图：
+
+- 头部轮廓（半径 1 的圆）+ 鼻子（额顶部小三角）+ 双耳（左右标记），通道按
+  `viz.CHANNEL_2D` 坐标标成圆点（额在上、枕在下、奇左偶右、z 中线）。
+- 热力图用 `scipy.interpolate.griddata`（`method="linear"`）把通道值插值到头部圆内
+  的 64×64 网格，圆外 mask 成透明（NaN → 全透明 alpha=0），叠在头轮廓上；
+  colormap 用 pyqtgraph 内置 `magma`（适合暗色主题）。
+- 归一化方式：**log10(频带功率) → min-max 到 [0,1]**（对数压缩动态范围，突出空间
+  对比）；通道名不在 `CHANNEL_2D` 里时跳过该通道、不报错。
+- 顶部下拉选 delta/theta/alpha/beta/gamma 哪个频带上色，随 `_run_analysis`
+  （约 500ms）更新。合成源枕区 alpha 最强，选 alpha 时后脑勺（O1/Oz/O2）最亮；
+  点「模拟闭眼」alpha 整体增强后枕区更亮——这是「闭眼 alpha 上升」在空间上的体现。
+
+## 信号质量（QualityPanel）
+
+左侧波形下方的「信号质量」面板，对当前分析窗（滤波后）的每通道算 4 个软件代理
+指标，按阈值打绿/黄/红（阈值在 `viz.compute_channel_quality` 写死，依据见代码注释）：
+
+1. **RMS 幅度**（µV）：过高=运动/肌肉伪迹（>100µV 判坏、>60µV 判可疑），
+   过低=电极脱落/平线（<1µV 判可疑）；
+2. **50Hz 残留**（50Hz 处 PSD 功率 µV²/Hz）：滤波后仍残留=陷波没压住/接地不良
+   （>50 判坏、>10 判可疑）；
+3. **平线检测**：窗口标准差 ≈ 0（≤0.05µV 判坏）；
+4. **饱和检测**：|x| 逼近满量程（合成源参考 ±200µV，≥195µV 的样本占比 >0.1% 判坏）。
+
+状态取最差指标（bad > warn > good）。展示为一行通道标签，背景色=状态色，附图例
+「● 正常 ● 可疑 ● 坏」；鼠标悬停标签可看具体原因（RMS 值 + 命中项）。合成源正常
+通道全绿，注入平线/饱和通道后标红。两个面板只看数据、不看源类型，真实硬件下照常工作。
+
 ## 冒烟验证（无 GUI）
 
 ```bash
@@ -159,6 +192,18 @@ cd ~/mood_BCI/software
 env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPATH= \
     QT_QPA_PLATFORM=offscreen .venv/bin/python scripts/gui_smoke.py
 ```
+
+脑地形图 / 信号质量自检（headless，不弹 GUI）：
+
+```bash
+cd ~/mood_BCI/software
+env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPATH= \
+    .venv/bin/python scripts/test_topo_quality.py
+```
+
+覆盖：① 合成源 alpha 频带 `band_power_map` 枕区(O1/Oz/O2)功率显著高于额区(F3/F4)；
+② 注入平线 + 饱和通道 → 质量检测标「坏」、其余通道不误标；③ 地形图插值网格形状
+正确、圆外 NaN/mask、朝向正确、跳过无坐标通道不报错。
 
 ## 会话录制
 

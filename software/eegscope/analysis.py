@@ -41,6 +41,27 @@ def welch_psd(sig, fs, nperseg=None):
     return freqs, psd
 
 
+def band_power_map(data, fs, band_lo, band_hi):
+    """逐通道频带功率：对每通道用 `welch_psd` 求 PSD，再对 [band_lo, band_hi)
+    频带做梯形积分，返回每通道频带功率 `np.ndarray (n_ch,)`（µV²）。
+
+    复用 `welch_psd`（不重写 PSD 逻辑），与 `EmotionAnalyzer._integrate` 同一
+    积分口径，供脑地形图面板等需要「空间分布」的场景使用。
+    """
+    data = np.asarray(data, dtype=np.float64)
+    if data.ndim == 1:
+        data = data[None, :]
+    n_ch, n = data.shape
+    if n < 2:
+        return np.zeros(n_ch, dtype=np.float64)
+    freqs, psd = welch_psd(data, fs)
+    m = (freqs >= band_lo) & (freqs < band_hi)
+    if not m.any():
+        return np.zeros(n_ch, dtype=np.float64)
+    return _trapz(psd[:, m], freqs[m], axis=1)
+
+
+
 class EmotionAnalyzer:
     def __init__(self, sample_rate, channel_names, bands=None,
                  faa_channels=("F3", "F4")):
