@@ -25,9 +25,19 @@ class SyntheticConfig:
 
 
 @dataclass
+class OpenBCIConfig:
+    port: str = ""
+    baudrate: int = 115200
+    n_channels: int = 0       # 0 = 自动取 channels 列表长度（须为 8 或 16）
+    gain: float = 24.0
+    scale_uv: float = 0.0     # 0 = 按 gain 自动算；>0 = 直接覆盖 µV/count
+
+
+@dataclass
 class SourceConfig:
     type: str = "synthetic"
     synthetic: SyntheticConfig = field(default_factory=SyntheticConfig)
+    openbci: OpenBCIConfig = field(default_factory=OpenBCIConfig)
 
 
 @dataclass
@@ -89,6 +99,18 @@ def load_config(path: str) -> AppConfig:
                 setattr(cfg.source.synthetic, k, int(syn[k]))
             else:
                 setattr(cfg.source.synthetic, k, float(syn[k]))
+
+    obc = s.get("openbci") or {}
+    if "port" in obc:
+        cfg.source.openbci.port = str(obc["port"])
+    if "baudrate" in obc:
+        cfg.source.openbci.baudrate = int(obc["baudrate"])
+    if "n_channels" in obc:
+        cfg.source.openbci.n_channels = int(obc["n_channels"])
+    if "gain" in obc:
+        cfg.source.openbci.gain = float(obc["gain"])
+    if "scale_uv" in obc:
+        cfg.source.openbci.scale_uv = float(obc["scale_uv"])
 
     d = raw.get("dsp") or {}
     if "bandpass_hz" in d:

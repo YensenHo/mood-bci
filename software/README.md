@@ -1,9 +1,13 @@
-# eegscope — 实时脑电可视化 + 情绪分析桌面应用（硬件无关 MVP）
+# eegscope — 实时脑电可视化 + 情绪分析桌面应用
 
-本项目是「情绪脑电采集」的软件核心。当前版本**不需要任何真实硬件**——用合成脑电
-数据源驱动，实时显示多通道滚动波形、频谱和情绪指标（FAA 额叶偏侧化 + 分频带功率）。
-架构上预留了清晰的 **DataSource 插件接口**，后续接入真实 ADS1299 串口驱动时，
-只需实现一个类并注册进工厂，其余管线（DSP / 分析 / 可视化）完全不用改。
+本项目是「情绪脑电采集」的软件。两种数据源开箱即用：
+
+- **SyntheticSource**：合成真实感脑电（无需任何硬件），用于先验证整条链路 + 软件功能。
+- **OpenBCISource**：OpenBCI 兼容 ADS1299 板的串口驱动（8ch/16ch），接真实硬件用。
+
+实时显示多通道滚动波形、频谱、情绪指标（FAA 额叶偏侧化 + 分频带功率）。接真实硬件时
+只需把 `config.yaml` 的 `source.type` 改成 `openbci` 并填串口号，DSP / 分析 / 可视化
+一行不用改。
 
 ---
 
@@ -16,8 +20,10 @@ software/
   config.yaml            # 采样率 / 通道名 / 数据源 / 滤波 / 分析 / 可视化参数
   main.py                # 入口：读 config → 造 source → 启动 GUI
   scripts/
-    smoke_test.py        # headless 冒烟测试（无 GUI）
+    smoke_test.py        # headless 冒烟测试（合成源，无 GUI）
     gui_smoke.py         # GUI 无头启动冒烟测试（offscreen 平台）
+    test_openbci_parser.py  # OpenBCI 帧解析器单元测试（无需硬件）
+    capture_serial.py    # 抓串口原始字节，验证真实硬件协议
   eegscope/
     __init__.py
     config.py            # 读并校验 config.yaml（dataclass）
@@ -25,6 +31,7 @@ software/
       __init__.py        # make_source() 工厂 —— 真实数据源在此注册
       base.py            # DataSource 抽象基类（start/stop/read + sample_rate/n_channels）
       synthetic.py       # SyntheticSource 合成真实感脑电
+      openbci.py         # OpenBCISource OpenBCI 兼容板串口驱动（8ch/16ch Daisy）
     dsp.py               # 信号链：带通 0.5-45Hz + 50Hz 陷波 + 去直流/去趋势（在线带状态）
     analysis.py          # FAA + 分频带功率（Welch），含 F3/F4 缺失降级
     viz.py               # pyqtgraph 面板：堆叠波形 / 频谱 / 情绪指标（暗色主题）
@@ -49,7 +56,7 @@ cd ~/mood_BCI/software
 
 # 2) 清华镜像装依赖
 .venv/bin/pip install -i https://pypi.tuna.tsinghua.edu.cn/simple \
-    pyqtgraph PySide6 numpy scipy PyYAML
+    pyqtgraph PySide6 numpy scipy PyYAML pyserial
 ```
 
 > 运行任何 python 时**必须清空 PYTHONPATH**（否则 Hermes 的 venv 会污染 import）：
@@ -67,13 +74,15 @@ env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPAT
     .venv/bin/python main.py
 ```
 
-默认用合成数据源启动，16 通道滚动波形 + 频谱 + 情绪指标面板。UI 上：
+默认用合成数据源启动，16 通道滚动波形 + 频谱 + 情绪指标面板。UI 上（合成源专属）：
 
 - **alpha 幅度旋钮**：0=睁眼（alpha 弱）↔ 100=闭眼（alpha 强）。
 - **「模拟闭眼」按钮**：一键让 alpha 突然增大，用来验证整条链路是通的
   （项目 HARNESS 的链路自检指标：**闭眼 alpha 上升**）。
 - **PSD 通道**：下拉选择频谱面板看哪个通道的功率谱。
 - **暂停/继续**：暂停定时器（数据流停）。
+
+真实硬件（openbci 源）下，alpha 旋钮和「模拟闭眼」按钮自动隐藏。
 
 ## config.yaml 说明
 
@@ -83,6 +92,11 @@ env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPAT
 | `channels` | 通道名列表，**通道数 = 列表长度**，改这里即可增减通道 | 16ch（见下） |
 | `source.type` | 数据源类型 | `synthetic` |
 | `source.synthetic.*` | 合成源参数（seed/alpha 幅度/眨眼率/噪声/工频等） | — |
+| `source.openbci.port` | 串口设备（如 `/dev/cu.usbserial-XXXX`） | 空 |
+| `source.openbci.baudrate` | 波特率 | 115200 |
+| `source.openbci.n_channels` | 8 或 16（16=Daisy，每通道有效 125Hz） | 16 |
+| `source.openbci.gain` | PGA 增益（影响 µV 缩放） | 24 |
+| `source.openbci.scale_uv` | 0=按 gain 自动算；>0 直接覆盖 µV/count | 0 |
 | `dsp.bandpass_hz` | 带通范围 | [0.5, 45] |
 | `dsp.notch_hz` | 陷波频率 | 50（中国工频） |
 | `analysis.bands` | 分频带定义（Hz） | delta/theta/alpha/beta/gamma |
@@ -137,30 +151,49 @@ env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPAT
     QT_QPA_PLATFORM=offscreen .venv/bin/python scripts/gui_smoke.py
 ```
 
-## 接入真实 ADS1299 串口驱动（接口说明）
+## 真实硬件（OpenBCI 兼容 ADS1299 板）
 
-实现一个继承 `eegscope.sources.base.DataSource` 的类：
+用户买的「16 通道 ADS1299」是 OpenBCI 兼容板，走 OpenBCI Cyton/Daisy 串口协议。
+驱动 `eegscope/sources/openbci.py` 直接解析 33 字节帧，不依赖 OpenBCI 官方 GUI。
 
-```python
-class ADS1299Source(DataSource):
-    @property
-    def sample_rate(self): ...          # 例如 250.0
-    @property
-    def n_channels(self): ...           # 例如 16
-    @property
-    def channel_names(self): ...        # 可选，覆盖后波形面板显示真实通道名
-    def start(self): ...                # 打开串口、发 START/初始化命令
-    def stop(self): ...                 # 关闭串口
-    def read(self, n_samples): ...      # 从串口解析 n 个样本，返回 (n_ch, n) µV 数组
+### 板子到手第一步：抓字节验证协议（重要）
+
+克隆板波特率/帧格式/通道数可能与原版有出入，**先抓几秒原始字节确认，别瞎猜**：
+
+```bash
+# 列出串口（看采集板是哪个 /dev/cu.*）
+env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPATH= \
+    .venv/bin/python scripts/capture_serial.py
+
+# 抓 3 秒看前 128 字节 hexdump（看 0xA0 帧头是否连续、33 字节边界是否对齐）
+env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPATH= \
+    .venv/bin/python scripts/capture_serial.py /dev/cu.usbserial-XXXX -b 115200 -n 3
 ```
 
-然后在 `eegscope/sources/__init__.py` 的 `make_source()` 里加一个分支：
+抓到字节后确认三件事再改 `config.yaml`：① 波特率（标准 115200）；② 通道数
+（8 = Cyton / 16 = Daisy，看样本计数 bit0 是否区分主副板）；③ 缩放（若电压量级
+不对，用 `scale_uv` 覆盖）。
 
-```python
-if stype == "ads1299":
-    from .ads1299 import ADS1299Source
-    return ADS1299Source(cfg)
+### 接入运行
+
+1. `config.yaml`：`source.type` 改成 `openbci`，填 `openbci.port`（串口号）、
+   `n_channels`（8 或 16）、`gain`。
+2. 运行 `main.py`（同合成源，见上文「运行」）。16ch Daisy 会自动把有效采样率
+   调到 125Hz（`main.py` 会打印一行「采样率以数据源为准」）。
+
+### 协议（备忘）
+
+- 每帧 33 字节：`0xA0` 帧头 + 样本计数 + 8×3 字节 24bit 有符号通道值 + 6 字节辅助
+  + 帧尾 `0xCx`。
+- 缩放：`µV = raw × (4.5e6 / (gain × 2^23))`，gain 24 → 0.02235 µV/count。
+- 16ch Daisy：样本计数 bit0 区分主（ch1-8）/副（ch9-16）板，每通道有效 125Hz。
+- 帧解析器（`FrameScanner`）带失步重同步，帧头/帧尾不符自动重对齐。
+
+### 驱动单元测试（无需硬件）
+
+```bash
+env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPATH= \
+    .venv/bin/python scripts/test_openbci_parser.py
 ```
 
-最后把 `config.yaml` 的 `source.type` 改成 `ads1299` 即可。DSP / 分析 / 可视化
-一行都不用改。当前版本**只写接口 + 合成数据源，不写真实串口驱动**。
+覆盖：µV 缩放、24bit 符号扩展、增益缩放、帧头扫描、失步重同步、8/16 通道采样率。

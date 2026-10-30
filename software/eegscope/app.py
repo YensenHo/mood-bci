@@ -25,7 +25,8 @@ class MainWindow(QMainWindow):
         self.analyzer = EmotionAnalyzer(cfg.sample_rate, cfg.channels,
                                         cfg.analysis.bands, cfg.analysis.faa_channels)
 
-        self.setWindowTitle("eegscope — 实时脑电可视化 + 情绪分析（合成数据）")
+        src_label = "合成数据" if getattr(source, "is_synthetic", False) else "真实硬件"
+        self.setWindowTitle(f"eegscope — 实时脑电可视化 + 情绪分析（{src_label}）")
         self._build_ui()
 
         # 分析/PSD 刷新周期（每 N 次 tick 算一次，约 500ms）
@@ -78,7 +79,8 @@ class MainWindow(QMainWindow):
         self.start_btn.toggled.connect(self._on_start_toggled)
         bar.addWidget(self.start_btn)
 
-        bar.addWidget(QLabel("alpha 幅度（睁眼↔闭眼）"))
+        self.alpha_label = QLabel("alpha 幅度（睁眼↔闭眼）")
+        bar.addWidget(self.alpha_label)
         self.alpha_slider = QSlider(Qt.Orientation.Horizontal)
         self.alpha_slider.setRange(0, 100)
         self.alpha_slider.setValue(int(self.source.alpha_level * 100))
@@ -90,6 +92,12 @@ class MainWindow(QMainWindow):
         self.eyes_btn.setCheckable(True)
         self.eyes_btn.toggled.connect(self._on_eyes_toggled)
         bar.addWidget(self.eyes_btn)
+
+        # 真实硬件没有 alpha 旋钮/模拟闭眼概念，隐藏相关控件
+        if not getattr(self.source, "is_synthetic", False):
+            self.alpha_label.hide()
+            self.alpha_slider.hide()
+            self.eyes_btn.hide()
 
         bar.addWidget(QLabel("PSD 通道"))
         self.ch_selector = QComboBox()

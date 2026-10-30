@@ -31,9 +31,18 @@ def make_source(cfg):
             drift_uv=s.drift_uv,
         )
 
-    # 预留：真实 ADS1299 串口驱动接入点
-    # if stype == "ads1299":
-    #     from .ads1299 import ADS1299Source
-    #     return ADS1299Source(cfg)
+    if stype == "openbci":
+        from .openbci import OpenBCISource
+        o = cfg.source.openbci
+        n_ch = o.n_channels or len(cfg.channels)
+        names = cfg.channels if len(cfg.channels) == n_ch else None
+        return OpenBCISource(
+            port=o.port,
+            baudrate=o.baudrate,
+            n_channels=n_ch,
+            gain=o.gain,
+            scale_uv=o.scale_uv if o.scale_uv > 0 else None,
+            channel_names=names,
+        )
 
-    raise ValueError(f"未知数据源类型: {cfg.source.type!r}（当前支持: synthetic）")
+    raise ValueError(f"未知数据源类型: {cfg.source.type!r}（当前支持: synthetic, openbci）")

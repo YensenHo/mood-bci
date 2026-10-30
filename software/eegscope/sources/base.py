@@ -32,6 +32,11 @@ class DataSource(ABC):
         """默认返回 ch1..chN；有名字的数据源覆盖此属性。"""
         return [f"ch{i + 1}" for i in range(self.n_channels)]
 
+    @property
+    def is_synthetic(self) -> bool:
+        """是否合成数据源（决定 GUI 是否显示 alpha 旋钮/模拟闭眼控件）。"""
+        return False
+
     @abstractmethod
     def start(self) -> None:
         """打开设备 / 初始化数据流。"""

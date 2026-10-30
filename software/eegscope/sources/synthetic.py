@@ -113,6 +113,10 @@ class SyntheticSource(DataSource):
     def channel_names(self):
         return list(self._names)
 
+    @property
+    def is_synthetic(self):
+        return True
+
     def start(self) -> None:
         self._started = True
 
