@@ -1,6 +1,7 @@
 """Qt 主窗口 + 数据流编排：source → dsp → analysis → viz。"""
 from __future__ import annotations
 
+import os
 import sys
 
 import pyqtgraph as pg
@@ -11,7 +12,12 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel,
 
 from .analysis import EmotionAnalyzer, welch_psd
 from .dsp import SignalChain
+from .recorder import SessionRecorder, config_snapshot
 from .viz import EmotionPanel, SpectrumPanel, WaveformPanel, setup_theme
+
+# 录制输出根目录（software/recordings/，与 CWD 无关）
+_RECORDINGS_DIR = os.path.join(os.path.dirname(os.path.dirname(
+    os.path.abspath(__file__))), "recordings")
 
 
 class MainWindow(QMainWindow):
@@ -39,6 +45,9 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self._tick)
         self.timer.start(cfg.viz.refresh_ms)
         self._frac = 0.0  # 分块读取的小数样本累积（保证平均采样率准确）
+
+        # 会话录制状态（懒初始化，按下「录制」才建 SessionRecorder）
+        self.recorder: SessionRecorder | None = None
 
     # ---- UI ----
     def _build_ui(self):
@@ -99,6 +108,23 @@ class MainWindow(QMainWindow):
             self.alpha_slider.hide()
             self.eyes_btn.hide()
 
+        # 会话录制 / 标记（合成与真实硬件都可用）
+        self.record_btn = QPushButton("录制")
+        self.record_btn.setCheckable(True)
+        self.record_btn.toggled.connect(self._on_record_toggled)
+        bar.addWidget(self.record_btn)
+
+        self.marker_combo = QComboBox()
+        self.marker_combo.setEditable(True)
+        self.marker_combo.addItems(["刺激开始", "刺激结束", "事件", "自定义"])
+        self.marker_combo.setCurrentText("刺激开始")
+        self.marker_combo.setFixedWidth(120)
+        bar.addWidget(self.marker_combo)
+
+        self.mark_btn = QPushButton("标记")
+        self.mark_btn.clicked.connect(self._on_mark_clicked)
+        bar.addWidget(self.mark_btn)
+
         bar.addWidget(QLabel("PSD 通道"))
         self.ch_selector = QComboBox()
         self.ch_selector.addItems(self.source.channel_names)
@@ -142,6 +168,47 @@ class MainWindow(QMainWindow):
             self.alpha_slider.blockSignals(False)
             self.eyes_btn.setText("模拟闭眼")
 
+    # ---- 会话录制 / 标记 ----
+    def _on_record_toggled(self, checked):
+        if checked:
+            self._start_recording()
+        else:
+            self._stop_recording()
+
+    def _start_recording(self):
+        self.recorder = SessionRecorder(
+            self.cfg.sample_rate,
+            self.source.channel_names,
+            source_type=type(self.source).__name__,
+            config_snapshot=config_snapshot(self.cfg),
+            recordings_dir=_RECORDINGS_DIR,
+        )
+        self.recorder.start()
+        self.record_btn.setText("停止录制")
+        self.info_label.setText("录制中…")
+
+    def _stop_recording(self):
+        if self.recorder is None:
+            return
+        out = self.recorder.stop()
+        self.recorder = None
+        # 复位按钮（blockSignals 防止再次触发 toggled 递归）
+        self.record_btn.blockSignals(True)
+        self.record_btn.setChecked(False)
+        self.record_btn.blockSignals(False)
+        self.record_btn.setText("录制")
+        if out:
+            self.info_label.setText(f"已保存: {os.path.basename(out)}")
+
+    def _on_mark_clicked(self):
+        if self.recorder is None or not self.recorder.is_recording:
+            self.info_label.setText("未在录制，无法标记")
+            return
+        label = self.marker_combo.currentText().strip() or "事件"
+        m = self.recorder.add_marker(label)
+        if m is not None:
+            self.info_label.setText(f"已标记 @ {m['time_s']:.1f}s: {label}")
+
     # ---- 数据流 ----
     def _tick(self):
         # 累积小数样本，保证平均读取速率 = sample_rate（50ms@250Hz 应读 12.5 样本/次）
@@ -153,6 +220,11 @@ class MainWindow(QMainWindow):
         chunk = self.source.read(n)
         filtered = self.dsp.process(chunk)
         self.waveform.push(filtered)
+
+        # 录制中：缓冲原始 µV 与滤波后数据
+        if self.recorder is not None and self.recorder.is_recording:
+            self.recorder.append(chunk, filtered)
+            self.record_btn.setText(f"停止录制 {self.recorder.elapsed_seconds:.0f}s")
 
         self._tick_count += 1
         if self._tick_count % self._analysis_every == 0:
@@ -196,6 +268,12 @@ class MainWindow(QMainWindow):
 
     def closeEvent(self, event):
         self.timer.stop()
+        # 若正在录制，先落盘再退出
+        if self.recorder is not None and self.recorder.is_recording:
+            try:
+                self.recorder.stop()
+            finally:
+                self.recorder = None
         self.source.stop()
         super().closeEvent(event)
 

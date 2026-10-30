@@ -24,6 +24,9 @@ software/
     gui_smoke.py         # GUI 无头启动冒烟测试（offscreen 平台）
     test_openbci_parser.py  # OpenBCI 帧解析器单元测试（无需硬件）
     capture_serial.py    # 抓串口原始字节，验证真实硬件协议
+    analyze_session.py   # 离线分析 CLI：对录制目录算时间分辨 FAA/频带功率
+    test_isc.py          # ISC 合成数据自检（前段高同步 / 后段独立噪声可区分）
+    test_recording.py    # headless 冒烟：录制→落盘→离线分析全链路
   eegscope/
     __init__.py
     config.py            # 读并校验 config.yaml（dataclass）
@@ -34,6 +37,8 @@ software/
       openbci.py         # OpenBCISource OpenBCI 兼容板串口驱动（8ch/16ch Daisy）
     dsp.py               # 信号链：带通 0.5-45Hz + 50Hz 陷波 + 去直流/去趋势（在线带状态）
     analysis.py          # FAA + 分频带功率（Welch），含 F3/F4 缺失降级
+    recorder.py          # 会话录制：内存缓冲 raw/filtered，停止落盘 session.npz + meta.json
+    isc.py               # 跨被试同步 ISC（同导联两两皮尔逊相关，滑窗）
     viz.py               # pyqtgraph 面板：堆叠波形 / 频谱 / 情绪指标（暗色主题）
     app.py               # Qt 主窗口 + 定时器，把 source→dsp→analysis→viz 串起来
 ```
@@ -81,6 +86,10 @@ env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPAT
   （项目 HARNESS 的链路自检指标：**闭眼 alpha 上升**）。
 - **PSD 通道**：下拉选择频谱面板看哪个通道的功率谱。
 - **暂停/继续**：暂停定时器（数据流停）。
+- **录制**：toggle 按钮，按下开始录制（内存缓冲原始 µV + 滤波后数据），再按停止并
+  落盘到 `recordings/<YYYYmmdd_HHMMSS>/`。
+- **标记**：录制中点击，把当前录制相对时间 + 标签（下拉/可编辑输入）追加到 meta
+  的 markers 列表，用于以后 ISC/ERP 的刺激时间对齐（本版只记时间戳，不呈现刺激）。
 
 真实硬件（openbci 源）下，alpha 旋钮和「模拟闭眼」按钮自动隐藏。
 
@@ -150,6 +159,84 @@ cd ~/mood_BCI/software
 env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPATH= \
     QT_QPA_PLATFORM=offscreen .venv/bin/python scripts/gui_smoke.py
 ```
+
+## 会话录制
+
+GUI 控制条上的「录制」是 toggle 按钮：按下开始（内存缓冲），再按停止并落盘到
+`recordings/<YYYYmmdd_HHMMSS>/`。停止录制或关闭窗口（closeEvent）时，若正在录制
+会先落盘再退出。
+
+### 录制格式
+
+每个录制目录包含两个文件：
+
+- **`session.npz`**（`np.savez_compressed` 压缩）：
+  - `raw`：原始 µV，shape `(n_ch, n)`，float32
+  - `filtered`：滤波后 µV，shape `(n_ch, n)`，float32（线上 `SignalChain` 输出）
+  - `fs`：采样率（float32 标量）
+  - `channel_names`：通道名（字符串数组）
+- **`meta.json`**：`sample_rate`、`channel_names`、`source_type`（数据源类型）、
+  `duration_seconds`（时长秒）、`recorded_at`（录制开始时间）、`config`（可 JSON 化
+  的配置快照：dsp / analysis.bands / faa_channels 等）、`markers`（标记列表）。
+
+`markers` 里每个元素形如 `{"time_s": 相对录制秒, "label": "刺激开始"}`，由「标记」
+按钮写入，供以后 ISC/ERP 的刺激时间对齐。
+
+### 内存占用提示（重要）
+
+当前录制是**纯内存缓冲**（raw + filtered 各一份 float32 列表），不做磁盘增量写。
+内存占用约 `2 × n_ch × n × 4 字节`。以 16ch、250Hz 为例：
+
+- 1 分钟 ≈ 16 × 15000 × 4 × 2 ≈ **1.8 MB**
+- 1 小时 ≈ **约 110 MB**
+
+长会话请留意内存（尤其 16ch Daisy 125Hz 或更长时间）；后续如需要可改为分块落盘
+或环形缓冲 + 磁盘。停止录制时一次性写盘。
+
+## 离线分析（analyze_session.py）
+
+```bash
+cd ~/mood_BCI/software
+env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPATH= \
+    .venv/bin/python scripts/analyze_session.py recordings/<YYYYmmdd_HHMMSS> \
+        --window-sec 2.0 --step-sec 1.0
+```
+
+- 加载 `session.npz`，用 `SignalChain`（带通 0.5-45 + 50Hz 陷波 + detrend）对 `raw`
+  **重新滤波**（保证离线自包含、与线上口径一致）；`raw` 缺失则退用 `filtered`。
+- 滑动窗（默认窗长 2s、步长 1s）对整段数据逐窗调 `EmotionAnalyzer.analyze`，得到
+  时间分辨的 FAA、分频带功率（delta/theta/alpha/beta/gamma）、valence/arousal。
+- 产出（写回录制目录）：`trajectories.npz`（各指标时间序列 + 时间轴）、
+  `report.md`（总时长/通道数/采样率/marker 数/FAA 均值标准差/各频带功率均值/
+  alpha 峰值位置 + 诚实说明）。
+- 完全 headless，不依赖 GUI。
+
+## ISC（跨被试同步，主指标骨架）
+
+ISC 是项目主指标（HARNESS「📊 指标」）：N 个观众看同一刺激时，同一导联的脑电
+随时间变化应高度同步。`eegscope/isc.py` 提供：
+
+```python
+from eegscope.isc import compute_isc
+t_axis, isc_curve = compute_isc(signals, fs, window_sec=5.0, step_sec=1.0)
+```
+
+- `signals`：`list[np.ndarray (n_ch, n)]`，N 个被试、同长度、同通道、**已由上层
+  对齐到同一时间轴 / 同一刺激起点**（对齐本身不在本模块做，这是留给以后接多被试
+  对齐数据的接口）。
+- 每个滑动窗内，对每对被试的**同导联**皮尔逊相关取平均（所有导联 × 所有被试对），
+  得到该窗 ISC 值；返回 `(t_axis, isc_curve)`。
+- 只做相关性，**不做分类、不需要被试内 baseline**（ISC 本身是相对的），天然绕开
+  HARNESS P1。
+
+合成数据自检：
+
+```bash
+cd ~/mood_BCI/software
+env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPATH= \
+    .venv/bin/python scripts/test_isc.py
+```
+
 
 ## 真实硬件（OpenBCI 兼容 ADS1299 板）
 
