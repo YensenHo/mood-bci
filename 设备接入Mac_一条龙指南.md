@@ -1,0 +1,224 @@
+# 脑电帽接 Mac 一条龙指南（板子到手照着做）
+
+> 这是一份「从插上 USB 到出情绪分析报告」的完整操作手册。软件已经写好、测好，全部命令都是真的，照抄即可。遇到任何一步卡住，先看最后「常见问题排查」。
+>
+> 软件位置：`~/mood_BCI/software/`（环境已装好，venv 在 `software/.venv`）。
+
+---
+
+## 0. 一句话地图
+
+```
+插 USB → 抓字节验证协议 → 填 config → 跑起来看脑电 → 闭眼自检(证明链路通) → 录一段 → 出报告
+```
+
+每一步下面都有具体命令，照着走。
+
+---
+
+## 1. 准备清单
+
+| 东西 | 说明 |
+|---|---|
+| 采集板（OpenBCI 兼容 16ch ADS1299） | 你买的这块 |
+| 电极 | 当前 3 个弹针电极（干电极，不用涂导电膏） |
+| USB 线 | 板子连 Mac |
+| Mac | Apple Silicon，软件环境已装好 |
+
+**弹针电极是干电极，不用打胶**（这正是你要的免涂抹方向），但代价是接触阻抗高、信号更挑贴法——所以闭眼自检 + 信号质量面板这两步是必须做的，别跳过。
+
+---
+
+## 2. 第 0 步：电极怎么贴（3 个弹针）
+
+脑电采集最少要 3 个电极各司其职：
+
+| 电极 | 放哪 | 作用 |
+|---|---|---|
+| **活动电极** | **O1 或 Oz（后脑勺枕区）** | 采 alpha 信号（枕区 alpha 最强，自检最明显） |
+| **参考电极** | 耳后乳突（耳垂后骨头突起） | 公共参考 |
+| **地/BIAS 电极** | 额头或另一侧耳后 | 共模抑制 |
+
+> 具体哪个针脚对应参考/地/活动，看板子丝印或说明书（每块板引脚定义可能不同，我这边无法替你的板子背书）。
+
+**为什么先贴枕区 O1**：项目 HARNESS 定的链路自检指标就是「闭眼 alpha 上升」，而 alpha 在枕区最明显，用枕区一个电极就能验通整条链。等你凑够 4 个电极（F3+F4+参考+地），再测额叶 FAA（情绪效价指标）。
+
+> 3 电极能做「alpha 自检」；做不了「FAA」（FAA 要 F3、F4 两个活动电极 + 参考 + 地 = 4 个）。这是电极数量的硬限制，不是软件缺功能。
+
+---
+
+## 3. 第 1 步：接上 + 找串口
+
+板子 USB 接 Mac，然后跑（先切到软件目录）：
+
+```bash
+cd ~/mood_BCI/software
+env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPATH= \
+    .venv/bin/python scripts/capture_serial.py
+```
+
+会列出所有串口，形如 `/dev/cu.usbserial-XXXX` 或 `/dev/cu.wchusbserial-XXXX`（CH340 芯片）或 `/dev/cu.SLAB_USBtoUART`（CP2102）。**记下这个串口号，后面要用。**
+
+> 列不出串口 → 看「常见问题排查」第 1 条。
+
+---
+
+## 4. 第 2 步：抓字节验证协议（必做，别跳过）
+
+你这块是「OpenBCI 兼容」克隆板，波特率/帧格式/通道数可能和原版有出入。**先抓 3 秒原始字节确认，别瞎猜。**
+
+```bash
+cd ~/mood_BCI/software
+env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPATH= \
+    .venv/bin/python scripts/capture_serial.py /dev/cu.usbserial-XXXX -b 115200 -n 3
+```
+
+（把 `/dev/cu.usbserial-XXXX` 换成第 1 步记下的串口号）
+
+输出是一串十六进制。**看三点**：
+
+1. **帧头 `a0`**：每一行开头附近应反复出现 `a0`。OpenBCI 每帧 33 字节，开头 `a0`、结尾 `c0`（或 `c1`~`c6`）。如果 `a0` 是连续规律出现的，协议对上了。
+2. **波特率对不对**：如果 `a0` 出现但乱、或者全是乱码，换波特率重抓（常见 115200、230400、921600，逐个试）。
+3. **通道数（8 还是 16）**：看第 2 个字节（样本计数）的最低 bit——如果它在 0/1 之间规律跳变，是 16ch Daisy 模式（两片 ADS1299 级联）；如果连续递增，是 8ch。
+
+**抓出来的字节先截图/存下来**（`-o raw.bin` 存文件），这是后面排查的原始依据。
+
+---
+
+## 5. 第 3 步：填 config.yaml
+
+打开 `~/mood_BCI/software/config.yaml`，改两处：
+
+```yaml
+source:
+  type: openbci            # 从 synthetic 改成 openbci
+  openbci:
+    port: "/dev/cu.usbserial-XXXX"   # 第 1 步记下的串口号
+    baudrate: 115200       # 第 2 步确认的波特率
+    n_channels: 16         # 8 或 16，按第 2 步抓到的通道数填
+    gain: 24.0             # 先按 OpenBCI 标准 24，电压量级不对再调
+    scale_uv: 0.0          # 0=按 gain 自动算；电压明显不对时填这个覆盖
+```
+
+**通道名和硬件通道数的关系（重要，别填错）**：
+
+- `n_channels` 填**硬件实际通道数**（16 就是 16）。不能因为「只接了 3 个电极」就填 3——硬件始终把 16 个通道都传上来。
+- 你 3 个电极实际只接了 16 个输入里的 **1 个数据通道**（另外两个是参考和地，走参考/BIAS 针脚，不算数据通道）。剩下 15 个数据通道是**悬空的**，会显示平线或噪声、信号质量面板标红——**这是正常的，别慌**，只看你接的那个通道（用 PSD 通道下拉 / 时频图通道下拉选中它）。
+- `channels` 列表顺序要跟板子输出顺序一致（看说明书），把你接的那个通道名改成对应的 10-20 位置（比如 `O1`），波形/地形图上才能对上号。
+- 缺 F4 时 FAA 会自动显示「需 F3/F4」，不会报错。
+
+---
+
+## 6. 第 4 步：跑起来看脑电
+
+```bash
+cd ~/mood_BCI/software
+env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPATH= \
+    .venv/bin/python main.py
+```
+
+应该弹出窗口，看到：
+
+- **波形面板**：多通道滚动波形（已经在动 = 有数据进来了）。
+- **信号质量面板**：每个通道一个色块。**全绿 = 电极接触好**；有红/黄 = 那个电极没贴好（见排查表）。
+- **情绪面板**：FAA + 分频带功率。
+
+> 波形全是平线 → 电极脱落（质量面板会标红）。波形是满屏 50Hz 正弦 → 参考/地没贴好。
+
+---
+
+## 7. 第 5 步：链路自检（最重要，先证明链路是通的）
+
+这一步证明「电极 → 板子 → 串口 → 软件」整条链真的在采脑电，而不是在采噪声。
+
+**方法：闭眼 vs 睁眼，看 alpha。**
+
+1. 安静坐着，**睁眼**看屏幕 10 秒，记下情绪面板里 alpha 的数值。
+2. **闭眼**放松 10 秒，再看 alpha 数值。
+3. **判据：闭眼 alpha 明显高于睁眼**（正常高好几倍）。
+
+三个地方都能看这个现象：
+
+| 面板 | 怎么看 |
+|---|---|
+| 情绪面板 | alpha 数值闭眼明显变大 |
+| 脑地形图 | 选「alpha」频带，闭眼时**后脑勺（枕区）变亮** |
+| 时频图 | 选 O1 通道，闭眼时 **10Hz 那条横带变亮** |
+
+**测不到闭眼 alpha 上升 = 链路断了**（电极没贴好 / 串口没数据 / 协议不对）。这时候先解决链路，别急着谈情绪——这是 HARNESS 定的铁律。
+
+---
+
+## 8. 第 6 步：录一段 + 出分析报告
+
+界面左上角有 **「录制」** 按钮：
+
+1. 点「录制」开始 → 做你想测的事（看片/看图/静息）→ 再点「录制」停止。
+2. 数据自动存到 `recordings/<时间戳>/`，里面有 `session.npz`（脑电数据）+ `meta.json`（元信息+标记）。
+
+出情绪分析报告：
+
+```bash
+cd ~/mood_BCI/software
+env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPATH= \
+    .venv/bin/python scripts/analyze_session.py recordings/<时间戳>
+```
+
+会在那个目录生成 `report.md`（FAA 均值/方差、各频带功率、alpha 峰值位置）+ `trajectories.npz`（逐时刻的 FAA/频带功率曲线）。
+
+> 报告里会有一句诚实声明：这是**单被试辅助指标，不是 ISC 主指标**。项目主指标 ISC 要多个被试看同一内容才能算。
+
+---
+
+## 9. 第 7 步：ERP 事件相关电位（可选，需多次标记）
+
+ERP 是「刺激锁时叠加平均」：给很多次相同的刺激，每次按「标记」按钮记下时刻，事后叠加平均，把淹没在噪声里的诱发响应捞出来。
+
+1. 录制时，在每次刺激出现的瞬间点「标记」按钮（录多少下就点多少下）。
+2. 录完跑：
+
+```bash
+cd ~/mood_BCI/software
+env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPATH= \
+    .venv/bin/python scripts/analyze_erp.py recordings/<时间戳>
+```
+
+生成 `erp.npz` + `erp_report.md`（每通道 ERP 峰值潜伏期 ms / 峰幅 µV）。
+
+> 单试次 ERP 信噪比极低，**必须叠加很多次（几十次）才有意义**。这是 ERP 方法的本质，不是软件 bug。
+
+---
+
+## 10. 常见问题排查
+
+| 症状 | 原因 | 怎么办 |
+|---|---|---|
+| 列不出串口 | USB 没插好 / 线坏了 / 板子没供电 | 换线、换口、确认板子通电，重跑 `capture_serial.py` |
+| 抓到乱码、没有 `a0` | 波特率不对 | 换 115200/230400/921600 逐个试 |
+| 波形全平线 | 电极脱落 / 该通道没接 | 看质量面板标红的通道，重贴电极 |
+| 波形满屏 50Hz 正弦 | 参考/地没贴好，共模没压住 | 重贴参考（耳后）和地电极 |
+| 波形乱跳、噪声大 | 弹针电极接触阻抗高 | 把弹针按紧贴实头皮、拨开头发；看质量面板黄/红通道 |
+| 有波形但闭眼 alpha 不升 | 活动电极没放枕区 / 链路实际没采到脑电 | 确认活动电极在 O1/Oz，重测睁闭眼 |
+| 电压量级明显不对（比如波形全是几千 µV） | gain / scale 不对 | config 里调 `gain` 或直接填 `scale_uv` 覆盖 |
+
+---
+
+## 11. 附：协议备忘 + 命令速查
+
+**OpenBCI 协议备忘**（抓字节时对照）：
+
+- 每帧 **33 字节**：`0xA0` 帧头 + 样本计数 + 8 通道 × 3 字节（24bit 有符号大端）+ 6 字节辅助 + 帧尾 `0xCx`。
+- 缩放：`µV = raw × (4.5e6 / (gain × 2^23))`，gain 24 → **0.02235 µV/count**。
+- 16ch Daisy：样本计数最低 bit 区分主（ch1-8）/副（ch9-16）板，每通道有效 **125Hz**；8ch 是 **250Hz**。
+
+**命令速查**（都在 `~/mood_BCI/software/` 下跑，前面统一加 `env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPATH=`）：
+
+| 想干什么 | 命令 |
+|---|---|
+| 列串口 | `.venv/bin/python scripts/capture_serial.py` |
+| 抓字节验证 | `.venv/bin/python scripts/capture_serial.py <串口> -b 115200 -n 3` |
+| 跑起来看脑电 | `.venv/bin/python main.py` |
+| 离线情绪分析 | `.venv/bin/python scripts/analyze_session.py recordings/<时间戳>` |
+| ERP 分析 | `.venv/bin/python scripts/analyze_erp.py recordings/<时间戳>` |
+
+> 所有 `env -i ... PYTHONPATH=` 前缀不能省——它清掉 Hermes 的环境变量，否则会污染 import 导致跑不起来。
