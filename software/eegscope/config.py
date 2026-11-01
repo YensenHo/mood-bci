@@ -31,6 +31,7 @@ class OpenBCIConfig:
     n_channels: int = 0       # 0 = 自动取 channels 列表长度（须为 8 或 16）
     gain: float = 24.0
     scale_uv: float = 0.0     # 0 = 按 gain 自动算；>0 = 直接覆盖 µV/count
+    gain_code: int = -1       # 增益指令参数（0=1x..6=24x）；-1=不发送增益指令（保持板子默认）
 
 
 @dataclass
@@ -111,6 +112,8 @@ def load_config(path: str) -> AppConfig:
         cfg.source.openbci.gain = float(obc["gain"])
     if "scale_uv" in obc:
         cfg.source.openbci.scale_uv = float(obc["scale_uv"])
+    if "gain_code" in obc:
+        cfg.source.openbci.gain_code = int(obc["gain_code"])
 
     d = raw.get("dsp") or {}
     if "bandpass_hz" in d:

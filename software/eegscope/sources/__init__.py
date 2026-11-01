@@ -43,6 +43,7 @@ def make_source(cfg):
             gain=o.gain,
             scale_uv=o.scale_uv if o.scale_uv > 0 else None,
             channel_names=names,
+            gain_code=None if o.gain_code < 0 else o.gain_code,
         )
 
     raise ValueError(f"未知数据源类型: {cfg.source.type!r}（当前支持: synthetic, openbci）")

@@ -104,7 +104,8 @@ class OpenBCISource(DataSource):
     """
 
     def __init__(self, port, baudrate=115200, n_channels=16, gain=24.0,
-                 scale_uv=None, channel_names=None, timeout=2.0):
+                 scale_uv=None, channel_names=None, timeout=2.0,
+                 gain_code=None):
         if n_channels not in (8, 16):
             raise ValueError(f"OpenBCI 仅支持 8 或 16 通道，收到 {n_channels}")
         self._port = port
@@ -114,6 +115,13 @@ class OpenBCISource(DataSource):
         self._gain = float(gain)
         self._scale = float(scale_uv) if scale_uv else None
         self._timeout = float(timeout)
+        # gain_code：RT-BCI 板的「x 通道 ... X」增益指令参数（0=1x,1=2x,2=4x,3=6x,4=8x,5=12x,6=24x）。
+        # None = 不发送增益指令（保持板子上电默认，通常 24x）。
+        self._gain_code = None if gain_code is None else int(gain_code)
+        if self._gain_code is not None:
+            # 发送了增益指令后，缩放用的增益要跟着变，否则 µV 值错 24 倍
+            _gmap = {0: 1.0, 1: 2.0, 2: 4.0, 3: 6.0, 4: 8.0, 5: 12.0, 6: 24.0}
+            self._gain = _gmap.get(self._gain_code, 24.0)
         self._fs = 250.0 / (2.0 if self._daisy else 1.0)
 
         names = list(channel_names) if channel_names else None
@@ -154,8 +162,41 @@ class OpenBCISource(DataSource):
         if self._ser is None:
             self._ser = serial.Serial(self._port, self._baudrate, timeout=0.05)
         self._stop_event.clear()
+        self._handshake()
         self._thread = threading.Thread(target=self._reader_loop, daemon=True)
         self._thread.start()
+
+    def _handshake(self) -> None:
+        """RT-BCI 板握手：发 0xF0 → 等 "$$$" → （可选）设增益 → 发 'b' 开始采集。
+
+        失败不致命：reader 线程仍会尝试读帧（若板子已自行开始流式）。
+        """
+        ser = self._ser
+        if ser is None:
+            return
+        try:
+            ser.reset_input_buffer()
+            ser.write(b"\xF0")  # 触发「Success: System is Up」握手
+            buf = b""
+            deadline = time.time() + 2.0
+            while b"$$$" not in buf and time.time() < deadline:
+                d = ser.read(200)
+                if d:
+                    buf += d
+            # 可选：设置增益（打满 Railed 时把 gain_code 设为 0 = 1x）
+            # 固件 BCI_parse 用紧凑格式：x{通道}{power_down}{增益}{input}{bias}{srb2}{srb1}X
+            if self._gain_code is not None:
+                for ch in range(1, 9):
+                    ser.write(f"x{ch}0{self._gain_code}0000X".encode())
+                    time.sleep(0.005)
+                if self._daisy:
+                    # 16 通道：9~16 用 Q W E R T Y U I 表示
+                    for nm in "QWERTYUI":
+                        ser.write(f"x{nm}0{self._gain_code}0000X".encode())
+                        time.sleep(0.005)
+            ser.write(b"b")  # 开始采集
+        except Exception:
+            pass
 
     def stop(self) -> None:
         self._stop_event.set()

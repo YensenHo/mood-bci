@@ -16,7 +16,7 @@ channels: ["Fp1", "Fp2", "F3", "F4", "F7", "F8", "Fz", "Cz",
            "C3", "C4", "T7", "T8", "Pz", "O1", "O2", "Oz"]
 
 source:
-  type: synthetic          # 数据源类型：synthetic（合成，无需硬件）/ openbci（真实硬件）
+  type: openbci            # 数据源类型：synthetic（合成，无需硬件）/ openbci（真实硬件）
   synthetic:
     seed: 42               # 随机种子（可复现）
     alpha_level: 0.25      # 初始 alpha 幅度系数 0~1（0=睁眼/弱，1=闭眼/强）
@@ -31,11 +31,12 @@ source:
   # 用真实硬件时：把上面 type 改成 openbci，再填下面几项。
   # 板子到手先跑 scripts/capture_serial.py 抓字节确认协议，再定这几项。
   openbci:
-    port: ""              # 串口设备，如 /dev/cu.usbserial-XXXX（capture_serial.py 会列出来）
-    baudrate: 115200      # 波特率（OpenBCI 标准 115200；克隆板偶尔不同，抓字节后确认）
-    n_channels: 16        # 8 或 16（16 = Daisy 模式，每通道有效采样率 125Hz）
-    gain: 24.0            # PGA 增益（OpenBCI 标准 24；影响 µV 缩放）
-    scale_uv: 0.0         # 0 = 按 gain 自动算(0.02235 µV/count @24)；>0 直接覆盖
+    port: "/dev/cu.usbmodem6D92508D49871"   # 串口设备（STM32 虚拟串口，capture_serial.py 会列出来）
+    baudrate: 115200      # 波特率（USB CDC 虚拟串口，实际不敏感）
+    n_channels: 16        # 8 或 16（16 = 两层各 8，每通道有效采样率 125Hz）
+    gain: 24.0            # 缩放用增益（µV/count 计算）
+    scale_uv: 0.0         # 0 = 按 gain 自动算；>0 直接覆盖
+    gain_code: 0          # 发送给板子的增益指令：0=1x..6=24x；-1=不发送(保持板子默认)。打满Railed时用0(1x)
 
 dsp:
   bandpass_hz: [0.5, 45.0] # 带通 0.5–45 Hz（信号链必备之一）

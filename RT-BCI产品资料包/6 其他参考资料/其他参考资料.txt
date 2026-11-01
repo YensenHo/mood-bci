@@ -1,0 +1,2 @@
+参考OPENBCI官方网站文档
+https://docs.openbci.com/
