@@ -1,0 +1,67 @@
+# ============================================================
+# eegscope 配置文件
+# 说明：通道数 = channels 列表长度。改这里即可增减通道，无需改代码。
+# ============================================================
+
+# 采样率（Hz），ADS1299 典型值 250
+sample_rate: 250
+
+# 通道名（10-20 布局）。
+# 16ch 默认布局：
+#   - 8ch 核心（项目定）：F3 / F4 / F7 / F8 / T7 / T8 / O1 / O2
+#   - 中线补充：Fz / Cz / Pz
+#   - 对称补充：Fp1 / Fp2、C3 / C4、Oz
+# 弹针 3 电极场景可改成：["F3", "C3", "REF"]（2 EEG + 1 参考），FAA 会自动降级。
+# 64 通道：channels 写满 64 个（标准 10-10 布局参考 config.py 的 DEFAULT_CHANNELS_64），
+#   顺序必须 = 「64 个电极物理接到 4 块板 64 个通道」的顺序（板1→ch0-15，板2→ch16-31，…）。
+channels: ["Fp1", "Fp2", "F3", "F4", "F7", "F8", "Fz", "Cz",
+           "C3", "C4", "T7", "T8", "Pz", "O1", "O2", "Oz"]
+
+source:
+  type: openbci            # 数据源类型：synthetic（合成，无需硬件）/ openbci（真实硬件）
+  synthetic:
+    seed: 42               # 随机种子（可复现）
+    alpha_level: 0.25      # 初始 alpha 幅度系数 0~1（0=睁眼/弱，1=闭眼/强）
+    blink_rate: 0.25       # 眨眼频率（次/秒，泊松均值）
+    alpha_uv: 30.0         # alpha 振荡基准幅度（µV，枕区最强）
+    noise_uv: 8.0          # 1/f 粉噪声幅度（µV）
+    mains_uv: 12.0         # 50Hz 工频干扰幅度（µV）
+    harmonic_uv: 4.0       # 150Hz 工频谐波幅度（µV）
+    drift_uv: 20.0         # 缓漂移幅度（µV）
+
+  # ===== 真实硬件：OpenBCI 兼容板（16ch = 2×ADS1299 级联）=====
+  # 用真实硬件时：把上面 type 改成 openbci，再填下面几项。
+  # 板子到手先跑 scripts/capture_serial.py 抓字节确认协议，再定这几项。
+  openbci:
+    port: "/dev/cu.usbmodem6D92508D49871"   # 单板：串口设备（STM32 虚拟串口，capture_serial.py 会列出来）
+    # ports: [                              # 多板（64 通道 = 4 × 16ch）：把上面 port 注释掉，改用 ports 列表
+    #   "/dev/cu.usbmodemAAA",
+    #   "/dev/cu.usbmodemBBB",
+    #   "/dev/cu.usbmodemCCC",
+    #   "/dev/cu.usbmodemDDD",
+    # ]
+    baudrate: 115200      # 波特率（USB CDC 虚拟串口，实际不敏感）
+    n_channels: 16        # 每块板通道数：8 或 16（16 = 两层各 8，每通道有效采样率 125Hz）。多板时这里仍填「每块板」的通道数
+    gain: 24.0            # 缩放用增益（µV/count 计算）
+    scale_uv: 0.0         # 0 = 按 gain 自动算；>0 直接覆盖
+    gain_code: -1          # 发送给板子的增益指令：0=1x..6=24x；-1=不发送(保持板子默认)。⚠️ 本板固件 x 指令有 bug(会清零 CONFIG 寄存器)，先别用，用 -1
+
+dsp:
+  bandpass_hz: [0.5, 45.0] # 带通 0.5–45 Hz（信号链必备之一）
+  notch_hz: 50.0           # 50 Hz 陷波（中国工频，信号链必备之二）
+  notch_q: 30.0            # 陷波品质因数
+
+analysis:
+  window_seconds: 2.0      # 每次计算指标所用的滑动窗长（秒）
+  bands:                   # 分频带定义（Hz）
+    delta: [0.5, 4.0]
+    theta: [4.0, 8.0]
+    alpha: [8.0, 13.0]
+    beta:  [13.0, 30.0]
+    gamma: [30.0, 45.0]
+  faa_channels: ["F3", "F4"]  # FAA 所需的两通道（缺任一则优雅降级）
+
+viz:
+  window_seconds: 5.0      # 波形滚动窗长（秒）
+  refresh_ms: 50           # UI 刷新周期（毫秒）
+  channel_spacing_uv: 80.0 # 堆叠波形每通道的显示间距（µV）
