@@ -43,8 +43,10 @@ def test_config64_builds_64ch():
     # 关键通道在位：FAA 需 F3/F4，枕区 alpha 需 O*
     for want in ("F3", "F4", "O1", "Oz", "O2", "T7", "T8", "CB1"):
         assert want in names, f"缺关键通道 {want}"
-    # 无重复
-    assert len(set(names)) == 64, "64 通道名不应有重复"
+    # 无重复（信号通道名唯一；NC 占位=空通道，允许出现多次）
+    signal_names = [n for n in names if n != "NC"]
+    assert len(set(signal_names)) == len(signal_names), "信号通道名不应有重复"
+    assert names.count("NC") == 2, f"应有 2 个空通道占位 NC，实为 {names.count('NC')}"
 
 
 def test_read_aligns_to_min_length():
