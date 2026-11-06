@@ -6,3 +6,31 @@ venv/
 .DS_Store
 *.log
 recordings/
+
+# Hermes 本地数据(含桌面附件大 PDF)
+.hermes/
+
+# 产品资料包里的上位机安装程序(490M,无需上传)
+RT-BCI产品资料包/1 OPENBCI上位机/
+RT-BCI产品资料包/2 嵌入式程序/
+
+# 数据集 / 权重 / 大体积产物
+*.npy
+*.npz
+*.edf
+*.pth
+*.pt
+*.ckpt
+*.safetensors
+*.onnx
+*.mat
+*.dat
+*.bin
+*.zip
+*.7z
+*.rar
+*.tar.gz
+*.mp4
+*.mov
+*_cache/
+.cache/

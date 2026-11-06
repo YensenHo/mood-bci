@@ -11,6 +11,30 @@ DEFAULT_CHANNELS = [
     "C3", "C4", "T7", "T8", "Pz", "O1", "O2", "Oz",
 ]
 
+# 标准 10-10 系统 64 通道布局（含中线 + Iz 枕内电极）。
+# 注意：这只是「标准布局」参考。你帽子的实际布局以厂家标签为准，
+# 而且 channels 列表顺序必须匹配「64 个电极物理接到 4 块板 64 个通道」的顺序。
+DEFAULT_CHANNELS_64 = [
+    # 额极
+    "Fp1", "Fpz", "Fp2",
+    # 额前
+    "AF7", "AF3", "AFz", "AF4", "AF8",
+    # 额
+    "F7", "F5", "F3", "F1", "Fz", "F2", "F4", "F6", "F8",
+    # 额颞
+    "FT7", "FC5", "FC3", "FC1", "FCz", "FC2", "FC4", "FC6", "FT8",
+    # 颞 / 中央
+    "T7", "C5", "C3", "C1", "Cz", "C2", "C4", "C6", "T8",
+    # 颞顶
+    "TP7", "CP5", "CP3", "CP1", "CPz", "CP2", "CP4", "CP6", "TP8",
+    # 顶
+    "P7", "P5", "P3", "P1", "Pz", "P2", "P4", "P6", "P8",
+    # 顶枕
+    "PO7", "PO5", "PO3", "POz", "PO4", "PO6", "PO8",
+    # 枕 + 枕内
+    "O1", "Oz", "O2", "Iz",
+]
+
 
 @dataclass
 class SyntheticConfig:
@@ -27,8 +51,9 @@ class SyntheticConfig:
 @dataclass
 class OpenBCIConfig:
     port: str = ""
+    ports: List[str] = field(default_factory=list)  # 多板：多个串口（4 × 16ch = 64ch）；单板仍用 port
     baudrate: int = 115200
-    n_channels: int = 0       # 0 = 自动取 channels 列表长度（须为 8 或 16）
+    n_channels: int = 0       # 每块板通道数（8 或 16）；0 = 自动取 channels 列表长度 / 板数
     gain: float = 24.0
     scale_uv: float = 0.0     # 0 = 按 gain 自动算；>0 = 直接覆盖 µV/count
     gain_code: int = -1       # 增益指令参数（0=1x..6=24x）；-1=不发送增益指令（保持板子默认）
@@ -104,6 +129,8 @@ def load_config(path: str) -> AppConfig:
     obc = s.get("openbci") or {}
     if "port" in obc:
         cfg.source.openbci.port = str(obc["port"])
+    if "ports" in obc:
+        cfg.source.openbci.ports = [str(p) for p in (obc["ports"] or [])]
     if "baudrate" in obc:
         cfg.source.openbci.baudrate = int(obc["baudrate"])
     if "n_channels" in obc:

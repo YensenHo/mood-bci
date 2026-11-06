@@ -1,0 +1,118 @@
+# ============================================================
+# eegscope 64 通道配置（4 × 16ch RT-BCI 板）
+# 用法：python main.py config64.yaml
+# ============================================================
+
+# 采样率（Hz）。真实硬件以数据源为准：16ch 每通道 125Hz。
+sample_rate: 250
+
+# 64 通道名。顺序 = 物理接线顺序：
+#   板1 → 通道 1-16，板2 → 通道 17-32，板3 → 通道 33-48，板4 → 通道 49-64。
+# 每块 16ch 板内部：下层 1P-8P = 通道 1-8，上层(EXP 菊花链) = 通道 9-16。
+# 下面按「脑区」分配（地形图最直观）：板1=额区、板2=额侧+中央、板3=顶+颞后、板4=顶枕+枕。
+# ⚠️ 这个顺序必须和「你物理上把电极接到 4 块板哪个通道」完全一致；接法变了就改这里。
+channels:
+  # 板1（额区）通道 1-16
+  - Fp1
+  - Fpz
+  - Fp2
+  - AF7
+  - AF3
+  - AFz
+  - AF4
+  - AF8
+  - F7
+  - F5
+  - F3
+  - F1
+  - Fz
+  - F2
+  - F4
+  - F6
+  # 板2（额侧 + 中央）通道 17-32
+  - F8
+  - FT7
+  - FC5
+  - FC3
+  - FC1
+  - FCz
+  - FC2
+  - FC4
+  - FC6
+  - FT8
+  - T7
+  - C5
+  - C3
+  - C1
+  - Cz
+  - C2
+  # 板3（中央后 + 顶 + 颞后）通道 33-48
+  - C4
+  - C6
+  - T8
+  - TP7
+  - CP5
+  - CP3
+  - CP1
+  - CPz
+  - CP2
+  - CP4
+  - CP6
+  - TP8
+  - P7
+  - P5
+  - P3
+  - P1
+  # 板4（顶后 + 枕）通道 49-64
+  - Pz
+  - P2
+  - P4
+  - P6
+  - P8
+  - PO7
+  - PO5
+  - PO3
+  - POz
+  - PO4
+  - PO6
+  - PO8
+  - O1
+  - Oz
+  - O2
+  - Iz
+
+source:
+  type: openbci
+  openbci:
+    # 4 块板的串口（板1~板4 顺序必须与上面 channels 分组一致）
+    # ⚠️ 先插好 4 块板，跑 scripts/capture_serial.py 看真实串口名，填到这里。
+    ports:
+      - "/dev/cu.usbmodemAAA"   # 板1
+      - "/dev/cu.usbmodemBBB"   # 板2
+      - "/dev/cu.usbmodemCCC"   # 板3
+      - "/dev/cu.usbmodemDDD"   # 板4
+    baudrate: 115200      # USB CDC 虚拟串口，实际不敏感
+    n_channels: 16        # 每块板 16 通道
+    gain: 24.0            # 缩放用增益
+    scale_uv: 0.0         # 0 = 按 gain 自动算
+    gain_code: -1         # ⚠️ 本板固件 x 指令有 bug(清零 CONFIG)，保持 -1 不发送
+
+dsp:
+  bandpass_hz: [0.5, 45.0] # 带通 0.5–45 Hz
+  notch_hz: 50.0           # 50 Hz 陷波（中国工频）
+  notch_q: 30.0
+
+analysis:
+  window_seconds: 2.0
+  bands:
+    delta: [0.5, 4.0]
+    theta: [4.0, 8.0]
+    alpha: [8.0, 13.0]
+    beta: [13.0, 30.0]
+    gamma: [30.0, 45.0]
+  faa_channels: ["F3", "F4"]
+
+viz:
+  window_seconds: 5.0
+  refresh_ms: 50
+  channel_spacing_uv: 40.0  # 64 通道堆叠，间距调小（64×40=2560µV 纵向范围）

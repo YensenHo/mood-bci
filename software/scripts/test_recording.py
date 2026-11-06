@@ -39,6 +39,8 @@ def _clean_env():
 
 def main() -> int:
     cfg = load_config(CONFIG)
+    # 录制自测走合成源，不依赖 config.yaml 的实时硬件配置
+    cfg.source.type = "synthetic"
     fs = cfg.sample_rate
     source = make_source(cfg)
     source.start()

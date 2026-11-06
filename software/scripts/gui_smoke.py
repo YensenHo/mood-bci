@@ -28,6 +28,7 @@ from eegscope.viz import setup_theme
 def main() -> int:
     cfg = load_config(os.path.join(os.path.dirname(
         os.path.dirname(os.path.abspath(__file__))), "config.yaml"))
+    cfg.source.type = "synthetic"  # GUI 冒烟自测固定走合成源，不依赖 config.yaml 硬件配置
     source = make_source(cfg)
     source.start()
 

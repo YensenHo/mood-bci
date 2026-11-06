@@ -34,6 +34,9 @@ def read_seconds(source, seconds, fs, block_sec=0.2):
 
 def main() -> int:
     cfg = load_config(CONFIG)
+    # 冒烟测试是「合成源自测」，固定走合成源，不依赖 config.yaml 的实时硬件配置
+    # （config.yaml 可能已切到 openbci + 真实串口，此时自测不应去开串口）。
+    cfg.source.type = "synthetic"
     fs = cfg.sample_rate
     block = int(0.2 * fs)
 
