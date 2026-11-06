@@ -41,7 +41,7 @@ def test_config64_builds_64ch():
 
     names = src.channel_names
     # 关键通道在位：FAA 需 F3/F4，枕区 alpha 需 O*
-    for want in ("F3", "F4", "O1", "Oz", "O2", "T7", "T8", "Iz"):
+    for want in ("F3", "F4", "O1", "Oz", "O2", "T7", "T8", "CB1"):
         assert want in names, f"缺关键通道 {want}"
     # 无重复
     assert len(set(names)) == 64, "64 通道名不应有重复"

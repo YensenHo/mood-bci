@@ -79,7 +79,7 @@ channels:
   - O1
   - Oz
   - O2
-  - Iz
+  - CB1
 
 source:
   type: openbci
