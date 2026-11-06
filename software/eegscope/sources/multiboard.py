@@ -58,6 +58,10 @@ class MultiBoardSource(DataSource):
         return False
 
     @property
+    def full_scale_uv(self) -> float:
+        return self._boards[0].full_scale_uv
+
+    @property
     def alpha_level(self) -> float:
         return 0.0
 

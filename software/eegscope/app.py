@@ -4,6 +4,7 @@ from __future__ import annotations
 import os
 import sys
 
+import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import Qt, QTimer
 from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel,
@@ -46,6 +47,8 @@ class MainWindow(QMainWindow):
         self.timer.timeout.connect(self._tick)
         self.timer.start(cfg.viz.refresh_ms)
         self._frac = 0.0  # 分块读取的小数样本累积（保证平均采样率准确）
+        # 原始数据缓冲（未滤波）：电极接触检测要看「打满/平线」，滤波会把直流去掉
+        self._raw_hist = np.zeros((source.n_channels, 0), dtype=np.float64)
 
         # 会话录制状态（懒初始化，按下「录制」才建 SessionRecorder）
         self.recorder: SessionRecorder | None = None
@@ -70,7 +73,8 @@ class MainWindow(QMainWindow):
             self.source.n_channels, self.source.channel_names,
             self.cfg.viz.window_seconds, self.cfg.sample_rate,
             self.cfg.viz.channel_spacing_uv)
-        self.quality = QualityPanel(self.source.channel_names, self.cfg.sample_rate)
+        self.quality = QualityPanel(self.source.channel_names, self.cfg.sample_rate,
+                                    full_scale_uv=self.source.full_scale_uv)
         left_layout.addWidget(self.waveform, stretch=1)
         left_layout.addWidget(self.quality, stretch=0)
         splitter.addWidget(left)
@@ -238,6 +242,11 @@ class MainWindow(QMainWindow):
         chunk = self.source.read(n)
         filtered = self.dsp.process(chunk)
         self.waveform.push(filtered)
+        # 累积原始数据（供电极接触检测），长度与波形窗一致
+        self._raw_hist = np.concatenate([self._raw_hist, chunk], axis=1)
+        raw_max = int(self.cfg.viz.window_seconds * self.cfg.sample_rate)
+        if self._raw_hist.shape[1] > raw_max:
+            self._raw_hist = self._raw_hist[:, -raw_max:]
 
         # 录制中：缓冲原始 µV 与滤波后数据
         if self.recorder is not None and self.recorder.is_recording:
@@ -280,8 +289,9 @@ class MainWindow(QMainWindow):
         sp_data = hist[sp_idx, -min(hist.shape[1], sp_win):]
         self.spectrogram.update_spectrogram(sp_data)
 
-        # 信号质量：用当前分析窗（滤波后）逐通道打绿/黄/红
-        self.quality.update_quality(data)
+        # 电极接触检测：用原始数据窗（滤波会把打满通道的直流去掉，误判成平线）
+        raw_win = self._raw_hist[:, -min(self._raw_hist.shape[1], n_win):]
+        self.quality.update_quality(raw_win)
 
         if metrics.get("faa_ok"):
             self.info_label.setText(f"FAA {disp['faa']:+.3f}  "

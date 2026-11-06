@@ -7,8 +7,8 @@ import numpy as np
 import pyqtgraph as pg
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QFont, QPolygonF
-from PySide6.QtWidgets import (QComboBox, QGraphicsPolygonItem, QHBoxLayout,
-                               QLabel, QVBoxLayout, QWidget)
+from PySide6.QtWidgets import (QComboBox, QGraphicsPolygonItem, QGridLayout,
+                               QHBoxLayout, QLabel, QVBoxLayout, QWidget)
 from scipy.interpolate import griddata
 from scipy.signal import spectrogram
 
@@ -442,27 +442,29 @@ class TopographyPanel(QWidget):
 # 信号质量
 # =====================================================================
 
-def compute_channel_quality(data, fs, *, rms_hi_bad=100.0, rms_hi_warn=60.0,
+def compute_channel_quality(data, fs, *, full_scale_uv=None,
+                            rms_hi_bad=100.0, rms_hi_warn=60.0,
                             rms_lo_warn=1.0, flat_std=0.05, sat_uv=195.0,
                             sat_ratio=1e-3, mains_hz=50.0,
                             mains_power_warn=10.0, mains_power_bad=50.0):
     """对 (n_ch, n) 数据算每通道的软件代理质量指标，返回 list[dict]。
 
-    每通道 4 个指标（阈值依据见各注释）：
-      1. rms       ：窗口 RMS 幅度（µV）。过高=运动/肌肉伪迹，过低=电极脱落/平线。
+    每通道指标：
+      1. rms       ：窗口 RMS 幅度（µV）。过高=运动/肌肉伪迹，过低=脱落/平线。
       2. mains     ：50Hz 处 PSD 功率（µV²/Hz）。滤波后仍残留=陷波没压住/接地不良。
-      3. flat      ：窗口标准差 ≈ 0（平线）。
-      4. saturated ：|x| 逼近满量程 ±sat_uv 的样本占比（合成源满量程参考 ±200µV）。
+      3. flat      ：既「标准差≈0」又「rms≈0」→ 真·平线（没接上）。
+      4. saturated ：|x| 逼近满量程 sat_uv 的样本占比（电极悬空/打满）。
 
     状态取最差指标：good(0) < warn(1) < bad(2)。
-    阈值默认值依据：正常脑电 RMS 典型 5–50µV（合成源含眨眼时约 5–35µV），
-    因此 rms>100 判「坏」、>60 判「可疑」、<1 判「可疑」（接近脱落）；
-    平线阈值 0.05µV 已远低于任何生理信号；饱和阈值 195µV 贴近 ±200µV 满量程。
+    full_scale_uv：真实板满量程（gain 24 → 187500µV），给定后据此重算饱和阈值；
+                  不给定则用合成源口径（sat_uv 默认 195µV）。合成源满量程 ~±200µV。
     """
     data = np.asarray(data, dtype=np.float64)
     if data.ndim == 1:
         data = data[None, :]
     n_ch, n = data.shape
+    if full_scale_uv is not None:
+        sat_uv = 0.95 * float(full_scale_uv)
 
     mains_psd = None
     if n >= 16:
@@ -475,7 +477,8 @@ def compute_channel_quality(data, fs, *, rms_hi_bad=100.0, rms_hi_warn=60.0,
         x = data[i]
         rms = float(np.sqrt(np.mean(x * x))) if x.size else 0.0
         std = float(np.std(x)) if x.size else 0.0
-        flat = std <= flat_std
+        # 平线 = 既无波动又无幅度（真没接上）；打满的通道 std≈0 但 rms 巨大，不算平线
+        flat = (std <= flat_std) and (rms < rms_lo_warn)
         sat = float(np.mean(np.abs(x) >= sat_uv)) if x.size else 0.0
         saturated = sat > sat_ratio
         mains = float(mains_psd[i]) if mains_psd is not None else 0.0
@@ -484,25 +487,25 @@ def compute_channel_quality(data, fs, *, rms_hi_bad=100.0, rms_hi_warn=60.0,
         reasons = []
         if flat:
             sev = max(sev, 2)
-            reasons.append(f"平线(std={std:.3f}µV)")
+            reasons.append(f"没接上（无信号）")
         if saturated:
             sev = max(sev, 2)
-            reasons.append(f"饱和({sat * 100:.1f}%|x|≥{sat_uv}µV)")
+            reasons.append(f"接触不良（信号打满 {sat * 100:.0f}%）")
         if rms > rms_hi_bad:
             sev = max(sev, 2)
-            reasons.append(f"RMS过高({rms:.0f}µV)")
+            reasons.append(f"信号过大（可能松动/干扰，rms={rms:.0f}µV）")
         elif rms > rms_hi_warn:
             sev = max(sev, 1)
-            reasons.append(f"RMS偏高({rms:.0f}µV)")
+            reasons.append(f"信号偏大（rms={rms:.0f}µV）")
         elif rms < rms_lo_warn:
             sev = max(sev, 1)
-            reasons.append(f"RMS过低({rms:.2f}µV)")
+            reasons.append(f"信号太弱（接触差，rms={rms:.2f}µV）")
         if mains > mains_power_bad:
             sev = max(sev, 2)
-            reasons.append(f"50Hz残留({mains:.1f}µV²/Hz)")
+            reasons.append(f"工频干扰（接地不良，50Hz={mains:.0f}）")
         elif mains > mains_power_warn:
             sev = max(sev, 1)
-            reasons.append(f"50Hz残留({mains:.1f}µV²/Hz)")
+            reasons.append(f"工频干扰（50Hz={mains:.0f}）")
 
         status = {0: "good", 1: "warn", 2: "bad"}[sev]
         results.append({
@@ -515,7 +518,12 @@ def compute_channel_quality(data, fs, *, rms_hi_bad=100.0, rms_hi_warn=60.0,
 
 
 class QualityPanel(QWidget):
-    """信号质量面板：一行通道标签，背景色=状态色（绿=正常 黄=可疑 红=坏）。"""
+    """电极接触检测面板（傻子化设计）。
+
+    - 顶部大字总结：「✅ 64 个电极全部接触良好」或「⚠️ 5 个需调整」
+    - 第二行大白话指令：「请调整电极：F3、F4、O1」
+    - 通道用网格排布（64 通道 = 16 列 × 4 行），背景色=状态色，悬停看原因
+    """
 
     _STATUS_COLORS = {
         "good": "#2e7d32",
@@ -523,57 +531,105 @@ class QualityPanel(QWidget):
         "bad": "#c62828",
         "na": "#3a3a40",
     }
+    _STATUS_TEXT = {"good": "良好", "warn": "异常", "bad": "接触不良"}
 
-    def __init__(self, channel_names, fs):
+    def __init__(self, channel_names, fs, full_scale_uv=None):
         super().__init__()
         self.names = [str(c) for c in channel_names]
         self.fs = float(fs)
+        self.full_scale_uv = full_scale_uv
 
         layout = QVBoxLayout(self)
         layout.setContentsMargins(8, 6, 8, 8)
         layout.setSpacing(4)
 
+        # 标题 + 图例
         head = QHBoxLayout()
-        title = QLabel("信号质量")
+        title = QLabel("电极接触检测")
         title.setStyleSheet("font-weight: bold; font-size: 14px; color: #e0e0e0;")
         head.addWidget(title)
         head.addStretch(1)
         legend = QLabel(
-            '<span style="color:#4caf50">●</span> 正常&nbsp;&nbsp;'
-            '<span style="color:#f9a825">●</span> 可疑&nbsp;&nbsp;'
-            '<span style="color:#c62828">●</span> 坏')
+            '<span style="color:#4caf50">●</span> 良好&nbsp;&nbsp;'
+            '<span style="color:#f9a825">●</span> 异常&nbsp;&nbsp;'
+            '<span style="color:#c62828">●</span> 接触不良')
         legend.setStyleSheet("color: #aaa; font-size: 12px;")
         head.addWidget(legend)
         layout.addLayout(head)
 
-        row = QHBoxLayout()
-        row.setSpacing(2)
+        # 总体状态（大字总结）
+        self.summary = QLabel("等待数据…")
+        self.summary.setStyleSheet(
+            "font-size: 14px; font-weight: bold; color: #999; padding: 2px;")
+        layout.addWidget(self.summary)
+
+        # 请调整清单（大白话指令）
+        self.advice = QLabel("")
+        self.advice.setWordWrap(True)
+        self.advice.setStyleSheet("font-size: 12px; color: #f9a825; padding: 2px;")
+        layout.addWidget(self.advice)
+
+        # 通道网格（多行，适配 64 通道）
+        grid = QGridLayout()
+        grid.setSpacing(2)
         self._labels = []
-        for nm in self.names:
+        n = len(self.names)
+        cols = 16 if n > 16 else max(1, n)
+        for i, nm in enumerate(self.names):
             lbl = QLabel(nm)
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setFixedWidth(max(30, int(8 * len(nm))))
-            lbl.setFixedHeight(24)
+            lbl.setFixedHeight(22)
+            lbl.setMinimumWidth(34)
             lbl.setStyleSheet(
                 f"background-color:{self._STATUS_COLORS['na']}; color:#e0e0e0;"
-                "font-size: 11px; border-radius: 3px;")
-            row.addWidget(lbl)
+                "font-size: 10px; border-radius: 3px;")
+            grid.addWidget(lbl, i // cols, i % cols)
             self._labels.append(lbl)
-        row.addStretch(1)
-        layout.addLayout(row)
+        layout.addLayout(grid)
+        layout.addStretch(1)
 
     def update_quality(self, data) -> None:
-        """用当前窗数据刷新每通道状态色 + tooltip（命名避开 QWidget.update()）。"""
-        results = compute_channel_quality(data, self.fs)
-        for lbl, r in zip(self._labels, results):
+        """用当前窗数据刷新总结 + 每通道状态（命名避开 QWidget.update()）。"""
+        results = compute_channel_quality(data, self.fs, full_scale_uv=self.full_scale_uv)
+        good = warn = bad = 0
+        bad_names, warn_names = [], []
+        for lbl, r, nm in zip(self._labels, results, self.names):
             color = self._STATUS_COLORS.get(r["status"], self._STATUS_COLORS["na"])
             lbl.setStyleSheet(
-                f"background-color:{color}; color:#ffffff; font-size: 11px;"
+                f"background-color:{color}; color:#ffffff; font-size: 10px;"
                 "border-radius: 3px;")
-            tip = "正常"
+            tip = self._STATUS_TEXT.get(r["status"], "未知")
             if r["reasons"]:
-                tip = "；".join(r["reasons"])
-            lbl.setToolTip(f"RMS={r['rms']:.1f}µV · {tip}")
+                tip += "：" + "、".join(r["reasons"])
+            lbl.setToolTip(f"{nm} · RMS={r['rms']:.1f}µV · {tip}")
+            if r["status"] == "good":
+                good += 1
+            elif r["status"] == "bad":
+                bad += 1
+                bad_names.append(nm)
+            else:
+                warn += 1
+                warn_names.append(nm)
+
+        total = good + warn + bad
+        if total == 0:
+            self.summary.setText("等待数据…")
+            self.summary.setStyleSheet(
+                "font-size: 14px; font-weight: bold; color: #999; padding: 2px;")
+            self.advice.setText("")
+            return
+        need = bad_names + warn_names
+        if not need:
+            self.summary.setText(f"✅ {total} 个电极全部接触良好")
+            self.summary.setStyleSheet(
+                "font-size: 14px; font-weight: bold; color: #4caf50; padding: 2px;")
+            self.advice.setText("")
+        else:
+            self.summary.setText(
+                f"⚠️ {good}/{total} 良好 · {warn} 异常 · {bad} 接触不良")
+            self.summary.setStyleSheet(
+                "font-size: 14px; font-weight: bold; color: #f9a825; padding: 2px;")
+            self.advice.setText("请调整电极：" + "、".join(need))
 
 
 # =====================================================================

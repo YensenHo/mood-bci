@@ -37,6 +37,11 @@ class DataSource(ABC):
         """是否合成数据源（决定 GUI 是否显示 alpha 旋钮/模拟闭眼控件）。"""
         return False
 
+    @property
+    def full_scale_uv(self) -> float:
+        """满量程（µV），用于信号质量/饱和判定的参考。合成源默认 ±200µV，真实板覆盖。"""
+        return 200.0
+
     @abstractmethod
     def start(self) -> None:
         """打开设备 / 初始化数据流。"""

@@ -151,6 +151,11 @@ class OpenBCISource(DataSource):
         return False
 
     @property
+    def full_scale_uv(self) -> float:
+        """满量程（µV）= VREF/gain。gain 24 → 4.5e6/24 = 187500。"""
+        return VREF_UV / self._gain
+
+    @property
     def alpha_level(self) -> float:
         return 0.0  # 真实硬件无 alpha 旋钮概念（合成源专用）
 
