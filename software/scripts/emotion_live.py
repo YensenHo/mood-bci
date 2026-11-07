@@ -38,24 +38,40 @@ def main():
 
     fs = 125
     N = 2500
+    # 先做 1 秒快速检查，识别哪些板在流（跳过坏板）
+    alive = []
+    for bi, s in enumerate(srcs):
+        t0 = time.time(); n = 0
+        while time.time() - t0 < 1.0:
+            d = s.read(20)
+            if d.shape[1] > 0:
+                n += d.shape[1]
+        if n > 30:
+            alive.append(bi)
+    if not alive:
+        print("⚠️ 没有板在流数据")
+        return 1
+    print(f"在流板: {[bi + 1 for bi in alive]} (共 {len(alive)} 块 / {len(alive) * 16} 通道)")
+
+    # 只从在流的板读 ~20 秒
     chunks = [[] for _ in srcs]
     got = 0
     while got < N:
-        for bi, s in enumerate(srcs):
-            d = s.read(60)
+        for bi in alive:
+            d = srcs[bi].read(60)
             if d.shape[1] > 0:
                 chunks[bi].append(d)
         got += 60
         time.sleep(0.005)
-    data = np.concatenate([np.concatenate(c, axis=1)[:, :N] for c in chunks], axis=0)
-    for s in srcs:
-        try:
-            s.stop()
-        except Exception:
-            pass
+    data = np.concatenate([np.concatenate(chunks[bi], axis=1)[:, :N] for bi in alive], axis=0)
     print(f"数据: {data.shape}")
 
-    filt = np.array([notch(bp(x - x.mean(), fs), fs) for x in data])
+    def _clean(x):
+        y = bp(x - x.mean(), fs)
+        y = notch(y, fs, 25.0)   # 25Hz 硬件振荡陷波
+        return notch(y, fs, 50.0)  # 50Hz 工频陷波
+
+    filt = np.array([_clean(x) for x in data])
 
     bands = [("δ 0.5-4", 0.5, 4), ("θ 4-8", 4, 8), ("α 8-13", 8, 13),
              ("β 13-30", 13, 30), ("γ 30-45", 30, 45)]
