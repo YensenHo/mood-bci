@@ -445,21 +445,18 @@ class TopographyPanel(QWidget):
 # =====================================================================
 
 def compute_channel_quality(data, fs, *, full_scale_uv=None,
-                            rms_hi_bad=100.0, rms_hi_warn=60.0,
-                            rms_lo_warn=1.0, flat_std=0.05, sat_uv=195.0,
-                            sat_ratio=1e-3, mains_hz=50.0,
-                            mains_power_warn=10.0, mains_power_bad=50.0):
-    """对 (n_ch, n) 数据算每通道的软件代理质量指标，返回 list[dict]。
+                            rms_lo_warn=1.0, flat_std=0.05,
+                            railed_rms=150000.0, sat_uv=195.0,
+                            sat_ratio=1e-3, mains_hz=50.0):
+    """接触质量检测（傻子化）：只判「没接上 / 打满 / 良好」三态。
 
-    每通道指标：
-      1. rms       ：窗口 RMS 幅度（µV）。过高=运动/肌肉伪迹，过低=脱落/平线。
-      2. mains     ：50Hz 处 PSD 功率（µV²/Hz）。滤波后仍残留=陷波没压住/接地不良。
-      3. flat      ：既「标准差≈0」又「rms≈0」→ 真·平线（没接上）。
-      4. saturated ：|x| 逼近满量程 sat_uv 的样本占比（电极悬空/打满）。
+    - 没接上（平线）：rms≈0 且 std≈0，电极没贴到头皮。
+    - 接触不良（打满）：rms 逼近满量程 或 |x| 撞满量程，电极悬空/开路。
+    - 良好：其余（电极贴着头皮，有信号）。
 
-    状态取最差指标：good(0) < warn(1) < bad(2)。
-    full_scale_uv：真实板满量程（gain 24 → 187500µV），给定后据此重算饱和阈值；
-                  不给定则用合成源口径（sat_uv 默认 195µV）。合成源满量程 ~±200µV。
+    ⚠️ rms 偏高（50Hz 工频、运动伪迹）不再判「坏」——那是有信号但噪声大，
+    是滤波的事，不是「接触」的事。满量程用 full_scale_uv（真实板 187500µV），
+    给定后据此重算饱和阈值；不给定用合成源口径（sat_uv 默认 195µV）。
     """
     data = np.asarray(data, dtype=np.float64)
     if data.ndim == 1:
@@ -488,26 +485,15 @@ def compute_channel_quality(data, fs, *, full_scale_uv=None,
         sev = 0
         reasons = []
         if flat:
-            sev = max(sev, 2)
-            reasons.append(f"没接上（无信号）")
-        if saturated:
-            sev = max(sev, 2)
-            reasons.append(f"接触不良（信号打满 {sat * 100:.0f}%）")
-        if rms > rms_hi_bad:
-            sev = max(sev, 2)
-            reasons.append(f"信号过大（可能松动/干扰，rms={rms:.0f}µV）")
-        elif rms > rms_hi_warn:
-            sev = max(sev, 1)
-            reasons.append(f"信号偏大（rms={rms:.0f}µV）")
-        elif rms < rms_lo_warn:
-            sev = max(sev, 1)
-            reasons.append(f"信号太弱（接触差，rms={rms:.2f}µV）")
-        if mains > mains_power_bad:
-            sev = max(sev, 2)
-            reasons.append(f"工频干扰（接地不良，50Hz={mains:.0f}）")
-        elif mains > mains_power_warn:
-            sev = max(sev, 1)
-            reasons.append(f"工频干扰（50Hz={mains:.0f}）")
+            sev = 2
+            reasons.append("没接上（无信号）")
+        elif saturated or rms > railed_rms:
+            sev = 2
+            if saturated:
+                reasons.append(f"接触不良（信号打满 {sat * 100:.0f}%）")
+            else:
+                reasons.append(f"接触不良（信号过大 rms={rms:.0f}µV）")
+        # 其余 = 良好（贴着有信号；rms 高只是 50Hz/运动噪声，不算接触问题）
 
         status = {0: "good", 1: "warn", 2: "bad"}[sev]
         results.append({
