@@ -70,7 +70,7 @@ class SourceConfig:
 @dataclass
 class DSPConfig:
     bandpass_hz: List[float] = field(default_factory=lambda: [0.5, 45.0])
-    notch_hz: float = 50.0
+    notch_hz: List[float] = field(default_factory=lambda: [50.0, 25.0])
     notch_q: float = 30.0
 
 
@@ -147,7 +147,8 @@ def load_config(path: str) -> AppConfig:
     if "bandpass_hz" in d:
         cfg.dsp.bandpass_hz = [float(x) for x in d["bandpass_hz"]]
     if "notch_hz" in d:
-        cfg.dsp.notch_hz = float(d["notch_hz"])
+        v = d["notch_hz"]
+        cfg.dsp.notch_hz = [float(x) for x in v] if isinstance(v, (list, tuple)) else [float(v)]
     if "notch_q" in d:
         cfg.dsp.notch_q = float(d["notch_q"])
 

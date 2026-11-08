@@ -64,6 +64,11 @@ def main():
         got += 60
         time.sleep(0.005)
     data = np.concatenate([np.concatenate(chunks[bi], axis=1)[:, :N] for bi in alive], axis=0)
+    for s in srcs:
+        try:
+            s.stop()
+        except Exception:
+            pass
     print(f"数据: {data.shape}")
 
     def _clean(x):

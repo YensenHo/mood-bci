@@ -88,7 +88,8 @@ def run(rec_dir: str, window_sec: float, step_sec: float) -> int:
     cfg = meta.get("config") or {}
     dsp_cfg = cfg.get("dsp") or {}
     bandpass = tuple(dsp_cfg.get("bandpass_hz", [0.5, 45.0]))
-    notch_hz = float(dsp_cfg.get("notch_hz", 50.0))
+    _nh = dsp_cfg.get("notch_hz", [50.0, 25.0])
+    notch_hz = [float(x) for x in _nh] if isinstance(_nh, (list, tuple)) else [float(_nh)]
     notch_q = float(dsp_cfg.get("notch_q", 30.0))
 
     if raw is not None and raw.size > 0:

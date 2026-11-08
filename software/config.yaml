@@ -48,7 +48,7 @@ source:
 
 dsp:
   bandpass_hz: [0.5, 45.0] # 带通 0.5–45 Hz（信号链必备之一）
-  notch_hz: 50.0           # 50 Hz 陷波（中国工频，信号链必备之二）
+  notch_hz: [50.0, 25.0]   # 陷波：50Hz 工频 + 25Hz 硬件振荡（合成源无害）
   notch_q: 30.0            # 陷波品质因数
 
 analysis:

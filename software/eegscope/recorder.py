@@ -36,7 +36,7 @@ def config_snapshot(cfg) -> dict:
     try:
         snap["dsp"] = {
             "bandpass_hz": list(cfg.dsp.bandpass_hz),
-            "notch_hz": float(cfg.dsp.notch_hz),
+            "notch_hz": [float(x) for x in cfg.dsp.notch_hz],
             "notch_q": float(cfg.dsp.notch_q),
         }
     except AttributeError:
