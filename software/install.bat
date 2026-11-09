@@ -26,11 +26,12 @@ echo [2/2] 安装依赖（清华镜像加速）...
 
 echo.
 echo ============================================================
-echo  完成！先跑环境自检：
-echo    .venv\Scripts\python scripts\check_env.py
-echo  然后运行：
-echo    单板/16通道:  .venv\Scripts\python main.py config.yaml
-echo    64通道:       .venv\Scripts\python main.py config64.yaml
-echo    扫串口:       .venv\Scripts\python scripts\detect_boards.py
+echo  完成！推荐直接双击 start.bat（会打开图形启动器）。
+echo.
+echo  或手动：
+echo    自检:       .venv\Scripts\python scripts\check_env.py
+echo    自检+修复:  .venv\Scripts\python scripts\check_env.py --fix
+echo    单板/16通道: .venv\Scripts\python main.py config.yaml
+echo    64通道:      .venv\Scripts\python main.py config64.yaml
 echo ============================================================
 pause

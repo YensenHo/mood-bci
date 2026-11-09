@@ -1,0 +1,37 @@
+# ============================================================
+# eegscope 远程监控端配置（我的电脑：接收别人实时上传的数据）
+# 用法：python main.py config_remote.yaml
+# ============================================================
+
+# 采样率（Hz）。填和参与者端一致的采样率（8ch 板 = 250，16ch 板 = 125）。
+sample_rate: 250
+
+# 通道名：⚠️ 必须和参与者端 config 的 channels 完全一致（数量 + 顺序），
+# 否则解出来的波形是错的。这里给项目核心 8ch（ISC 布局）作例子。
+channels: ["F3", "F4", "F7", "F8", "T7", "T8", "O1", "O2"]
+
+source:
+  type: network            # 网络数据源：在本地起 WebSocket 服务器收数据
+  network:
+    host: "0.0.0.0"        # 0.0.0.0 = 监听所有网卡（收外网/局域网参与者）
+    port: 8765             # 监听端口。内网穿透时把隧道指向这个端口
+
+dsp:
+  bandpass_hz: [0.5, 45.0]
+  notch_hz: [50.0, 25.0]
+  notch_q: 30.0
+
+analysis:
+  window_seconds: 2.0
+  bands:
+    delta: [0.5, 4.0]
+    theta: [4.0, 8.0]
+    alpha: [8.0, 13.0]
+    beta: [13.0, 30.0]
+    gamma: [30.0, 45.0]
+  faa_channels: ["F3", "F4"]
+
+viz:
+  window_seconds: 5.0
+  refresh_ms: 50
+  channel_spacing_uv: 80.0

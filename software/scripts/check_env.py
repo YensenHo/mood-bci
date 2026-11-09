@@ -1,132 +1,142 @@
 #!/usr/bin/env python3
-"""check_env.py —— 一键环境自检（傻子化体检报告）。
+"""check_env.py —— 一键环境自检（傻子化体检报告，命令行版）。
 
 检查 4 件事，每件给「✅ 通过 / ⚠️ 缺啥」+ 大白话修复建议：
   1. Python 版本（要 3.10+）
   2. 依赖包（PySide6 / pyqtgraph / numpy / scipy / pyserial / PyYAML）
-  3. STM32 虚拟串口（板子 + 驱动是否就绪）
-  4. 最后给一句总结 + 下一步该干嘛
+  3. STM32 采集板（板子 + 驱动是否就绪）
+  4. STM32 虚拟串口（Windows 是否装 STM32 VCP 驱动）
 
-如果 STM32 串口没检测到，Windows 下会提示装 STM32 VCP 驱动，并可一键打开下载页。
+参数：
+  --fix             一键修复：自动装缺失依赖 +（Windows 缺驱动时）装 drivers/ 里的驱动
+  --install-driver  直接运行 software/drivers/ 里的 STM32 驱动安装器
+  --open-driver     打开 ST 官方驱动下载页
 
 用法：
-  Windows:  .venv\\Scripts\\python scripts\\check_env.py [--open-driver]
-  macOS:    .venv/bin/python scripts/check_env.py [--open-driver]
+  Windows:  .venv\\Scripts\\python scripts\\check_env.py [--fix]
+  macOS:    .venv/bin/python scripts/check_env.py [--fix]
 """
 from __future__ import annotations
 
 import os
-import platform
 import sys
 import webbrowser
 
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
-# ST 官方 STM32 虚拟串口(VCP)驱动页面（Windows 必装）
-STM32_DRIVER_URL = "https://www.st.com/en/development-tools/stsw-stm32102.html"
-
-_DEPS = {
-    "PySide6": "pip install PySide6",
-    "pyqtgraph": "pip install pyqtgraph",
-    "numpy": "pip install numpy",
-    "scipy": "pip install scipy",
-    "serial": "pip install pyserial",
-    "yaml": "pip install PyYAML",
-}
-
-
-def check_python() -> tuple[bool, str]:
-    ok = sys.version_info >= (3, 10)
-    return ok, platform.python_version()
-
-
-def check_deps() -> tuple[bool, list]:
-    missing = []
-    for mod, hint in _DEPS.items():
-        try:
-            __import__(mod)
-        except Exception:
-            missing.append((mod, hint))
-    return not missing, missing
-
-
-def check_stm32() -> tuple[bool, list]:
-    try:
-        from eegscope.sources.ports import detect_stm32_ports
-        ports = detect_stm32_ports()
-    except Exception:
-        ports = []
-    return len(ports) > 0, ports
+from eegscope.envcheck import (STM32_DRIVER_URL, IS_WIN, find_bundled_driver,
+                               install_driver, run_all_checks, run_fix)
 
 
 def main() -> int:
-    open_driver = "--open-driver" in sys.argv
-    is_win = sys.platform.startswith("win")
-    is_mac = sys.platform.startswith("darwin")
+    args = sys.argv[1:]
+
+    if "--install-driver" in args:
+        exe = find_bundled_driver()
+        if not exe:
+            print("❌ 没找到本地驱动安装器（software/drivers/ 目录为空）。")
+            print(f"   请到官网下载后把 exe 放进 drivers/：{STM32_DRIVER_URL}")
+            return 1
+        ok, out = install_driver(exe, print)
+        print(out)
+        return 0 if ok else 1
+
+    if "--fix" in args:
+        print("=" * 60)
+        print("  eegscope 一键修复")
+        print("=" * 60)
+        results = run_fix(print)
+        print("\n" + "=" * 60)
+        _print_summary(results)
+        return 0 if _all_ready(results) else 1
+
+    open_driver = "--open-driver" in args
 
     print("=" * 60)
     print("  eegscope 环境自检")
     print("=" * 60)
 
-    # 1) Python
-    ok_py, py_ver = check_python()
-    print(f"\n[1/4] Python 版本")
+    results = run_all_checks()
+    ok_py, py_ver = results["python"]
+    ok_dep, missing = results["deps"]
+    ok_board, ports = results["board"]
+    ok_drv, drv_note = results["driver"]
+
+    print("\n[1/4] Python 版本")
     if ok_py:
         print(f"  ✅ 通过：{py_ver}")
     else:
         print(f"  ❌ 版本太旧：{py_ver}（要 3.10+）")
         print("     去 https://www.python.org/downloads/ 装新版，勾选 Add to PATH")
 
-    # 2) 依赖
-    ok_dep, missing = check_deps()
-    print(f"\n[2/4] 依赖包")
+    print("\n[2/4] 依赖包")
     if ok_dep:
         print("  ✅ 全部装齐")
     else:
         print(f"  ❌ 缺 {len(missing)} 个：")
         for mod, hint in missing:
-            print(f"     - {mod}  →  {hint}")
-        print("     批量装：pip install -r requirements.txt")
+            print(f"     - {mod}  →  pip install {hint}")
+        print("     一键装：加 --fix 参数，或 pip install -r requirements.txt")
 
-    # 3) STM32 串口
-    ok_stm, ports = check_stm32()
-    print(f"\n[3/4] STM32 采集板")
-    if ok_stm:
+    print("\n[3/4] STM32 采集板")
+    if ok_board:
         print(f"  ✅ 检测到 {len(ports)} 块板：")
         for p in ports:
             sn = getattr(p, "serial_number", None) or "?"
             print(f"     - {p.device}  (SN={sn})")
     else:
         print("  ⚠️ 没检测到 STM32 串口。分两种情况：")
-        if is_win:
-            print("     a) 板子没插/没开机 → 检查 USB 线、按蓝键开机")
-            print("     b) 没装 STM32 驱动 → Windows 默认不认 STM32 虚拟串口")
-            print(f"        驱动下载页：{STM32_DRIVER_URL}")
-            print("        装完驱动，板子会出现在设备管理器「端口」里变成 COM3/COM4…")
-        elif is_mac:
-            print("     a) 板子没插/没开机 → 检查 USB 线、按蓝键开机")
-            print("     b) Type-C 直连 Mac 不识别 → 必须经 USB-A 侧（转接头/集线器）")
-        else:
-            print("     a) 板子没插/没开机 → 检查 USB 线、按蓝键开机")
-            print("     b) 权限不足 → sudo usermod -aG dialout $USER 后重插")
+        print("     a) 板子没插/没开机 → 检查 USB 线、按蓝键开机")
+        if IS_WIN:
+            print("     b) 没装 STM32 驱动 → 加 --fix 或 --install-driver 装")
 
-    # 4) 总结
+    print("\n[4/4] STM32 驱动")
+    if ok_drv:
+        print(f"  ✅ {drv_note}")
+    else:
+        print(f"  ❌ {drv_note}")
+        print(f"     官网：{STM32_DRIVER_URL}")
+
     print("\n" + "=" * 60)
-    all_ok = ok_py and ok_dep and ok_stm
-    if all_ok:
+    if _all_ready(results):
         print("  ✅ 环境全部就绪，可以直接跑：")
-        if is_win:
-            print("     .venv\\Scripts\\python main.py config64.yaml")
-        else:
-            print("     .venv/bin/python main.py config64.yaml")
+        _print_launch_hint()
         return 0
 
-    print("  ⚠️ 环境没就绪，按上面 [1][2][3] 的提示修完再跑。")
-    if not ok_stm and is_win:
+    print("  ⚠️ 环境没就绪，按上面 [1]-[4] 的提示修，或直接加 --fix 一键修复。")
+    if not ok_drv and IS_WIN:
         if open_driver or (input("\n要现在打开 STM32 驱动下载页吗？(y/n): ").strip().lower() == "y"):
             print("  正在打开浏览器…")
             webbrowser.open(STM32_DRIVER_URL)
     return 1
+
+
+def _print_summary(results):
+    ok_py, py_ver = results["python"]
+    ok_dep, missing = results["deps"]
+    ok_board, ports = results["board"]
+    ok_drv, drv_note = results["driver"]
+    print(f"  Python:   {'✅' if ok_py else '❌'} {py_ver}")
+    print(f"  依赖包:   {'✅' if ok_dep else '❌ ' + '、'.join(p for _, p in missing)}")
+    print(f"  采集板:   {'✅' if ok_board else '⚠️ 没检测到'}"
+          + (f"（{len(ports)} 块）" if ok_board else ""))
+    print(f"  STM32 驱动: {'✅' if ok_drv else '❌'} {drv_note}")
+
+
+def _all_ready(results):
+    ok_py, _ = results["python"]
+    ok_dep, _ = results["deps"]
+    ok_drv, _ = results["driver"]
+    return ok_py and ok_dep and ok_drv
+
+
+def _print_launch_hint():
+    if IS_WIN:
+        print("     .venv\\Scripts\\python main.py config64.yaml")
+        print("     或直接双击 start.bat")
+    else:
+        print("     .venv/bin/python main.py config64.yaml")
+        print("     或 bash start.sh")
 
 
 if __name__ == "__main__":

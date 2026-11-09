@@ -42,6 +42,15 @@ class DataSource(ABC):
         """满量程（µV），用于信号质量/饱和判定的参考。合成源默认 ±200µV，真实板覆盖。"""
         return 200.0
 
+    # 合成源可调的 alpha 幅度系数（0~1）。真实硬件/网络源无此概念，恒 0。
+    # GUI 会无条件读这个属性，所以放基类给默认值。注意：必须用「普通类属性」
+    # 而不是 @property——合成源在 __init__ 里 self.alpha_level = ... 直接赋值，
+    # 只读 property 没有 setter 会炸。
+    alpha_level: float = 0.0
+
+    def set_alpha_level(self, level: float) -> None:
+        """合成源专用；真实硬件/网络源 no-op。GUI 会无条件调用。"""
+
     @abstractmethod
     def start(self) -> None:
         """打开设备 / 初始化数据流。"""

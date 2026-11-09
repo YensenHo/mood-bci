@@ -174,6 +174,12 @@ class EmotionPanel(QWidget):
         self.faa_label.setStyleSheet("color: #888;")
         layout.addWidget(self.faa_label)
 
+        # 额叶 theta 不对称（效价备选指标，部分研究用 theta 更敏感）
+        self.theta_label = QLabel("θ不对称 = --")
+        self.theta_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.theta_label.setStyleSheet("color: #888; font-size: 13px;")
+        layout.addWidget(self.theta_label)
+
         # 分频带功率条
         bar_layout = QVBoxLayout()
         bar_title = QLabel("分频带功率")
@@ -226,6 +232,16 @@ class EmotionPanel(QWidget):
             color = "#888"
             self.faa_label.setText("需 F3/F4")
         self.faa_label.setStyleSheet(f"color: {color};")
+
+        # 额叶 theta 不对称
+        theta_asym = metrics.get("theta_asymmetry")
+        if theta_asym is not None:
+            tcolor = "#4caf50" if theta_asym >= 0 else "#f44336"
+            self.theta_label.setText(f"θ不对称 = {theta_asym:+.3f}")
+            self.theta_label.setStyleSheet(f"color: {tcolor}; font-size: 13px;")
+        else:
+            self.theta_label.setText("θ不对称 = --")
+            self.theta_label.setStyleSheet("color: #888; font-size: 13px;")
 
         # 频带功率条（dB）
         bands = metrics.get("bands") or {}

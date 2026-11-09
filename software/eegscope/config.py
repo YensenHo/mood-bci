@@ -61,10 +61,17 @@ class OpenBCIConfig:
 
 
 @dataclass
+class NetworkConfig:
+    host: str = "0.0.0.0"     # 监听地址（0.0.0.0 = 收外网参与者）
+    port: int = 8765          # 监听端口（内网穿透时此端口要被暴露出去）
+
+
+@dataclass
 class SourceConfig:
     type: str = "synthetic"
     synthetic: SyntheticConfig = field(default_factory=SyntheticConfig)
     openbci: OpenBCIConfig = field(default_factory=OpenBCIConfig)
+    network: NetworkConfig = field(default_factory=NetworkConfig)
 
 
 @dataclass
@@ -95,6 +102,13 @@ class VizConfig:
 
 
 @dataclass
+class RemoteConfig:
+    upload_enabled: bool = False   # 参与者端：是否一启动就自动上传（False = 手动点「上传」按钮）
+    upload_url: str = "ws://127.0.0.1:8765"  # 参与者端：数据发到这个地址（我的电脑隧道/LAN 地址）
+    participant: str = "被试"       # 参与者名字（监控端显示谁的数据）
+
+
+@dataclass
 class AppConfig:
     sample_rate: float = 250.0
     channels: List[str] = field(default_factory=lambda: list(DEFAULT_CHANNELS))
@@ -102,6 +116,7 @@ class AppConfig:
     dsp: DSPConfig = field(default_factory=DSPConfig)
     analysis: AnalysisConfig = field(default_factory=AnalysisConfig)
     viz: VizConfig = field(default_factory=VizConfig)
+    remote: RemoteConfig = field(default_factory=RemoteConfig)
 
 
 def load_config(path: str) -> AppConfig:
@@ -143,6 +158,12 @@ def load_config(path: str) -> AppConfig:
     if "gain_code" in obc:
         cfg.source.openbci.gain_code = int(obc["gain_code"])
 
+    net = s.get("network") or {}
+    if "host" in net:
+        cfg.source.network.host = str(net["host"])
+    if "port" in net:
+        cfg.source.network.port = int(net["port"])
+
     d = raw.get("dsp") or {}
     if "bandpass_hz" in d:
         cfg.dsp.bandpass_hz = [float(x) for x in d["bandpass_hz"]]
@@ -167,5 +188,13 @@ def load_config(path: str) -> AppConfig:
         cfg.viz.refresh_ms = int(v["refresh_ms"])
     if "channel_spacing_uv" in v:
         cfg.viz.channel_spacing_uv = float(v["channel_spacing_uv"])
+
+    r = raw.get("remote") or {}
+    if "upload_enabled" in r:
+        cfg.remote.upload_enabled = bool(r["upload_enabled"])
+    if "upload_url" in r:
+        cfg.remote.upload_url = str(r["upload_url"])
+    if "participant" in r:
+        cfg.remote.participant = str(r["participant"])
 
     return cfg

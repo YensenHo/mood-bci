@@ -11,15 +11,16 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel,
                                QMainWindow, QPushButton, QSlider, QSplitter,
                                QVBoxLayout, QWidget)
 
+from . import _runtime
 from .analysis import EmotionAnalyzer, band_power_map, welch_psd
 from .dsp import SignalChain
 from .recorder import SessionRecorder, config_snapshot
+from .remote import StreamUploader
 from .viz import (EmotionPanel, QualityPanel, SpectrogramPanel, SpectrumPanel,
                   TopographyPanel, WaveformPanel, setup_theme)
 
-# 录制输出根目录（software/recordings/，与 CWD 无关）
-_RECORDINGS_DIR = os.path.join(os.path.dirname(os.path.dirname(
-    os.path.abspath(__file__))), "recordings")
+# 录制输出根目录：dev = software/recordings/；frozen = exe 目录/recordings/
+_RECORDINGS_DIR = _runtime.data_dir("recordings")
 
 
 class MainWindow(QMainWindow):
@@ -54,6 +55,8 @@ class MainWindow(QMainWindow):
 
         # 会话录制状态（懒初始化，按下「录制」才建 SessionRecorder）
         self.recorder: SessionRecorder | None = None
+        # 远程上传状态（懒初始化，按下「上传」才建 StreamUploader）
+        self.uploader: StreamUploader | None = None
 
     # ---- UI ----
     def _build_ui(self):
@@ -149,6 +152,12 @@ class MainWindow(QMainWindow):
         self.mark_btn.clicked.connect(self._on_mark_clicked)
         bar.addWidget(self.mark_btn)
 
+        # 远程上传（参与者端：把数据实时发到我的电脑）
+        self.upload_btn = QPushButton("📤 上传")
+        self.upload_btn.setCheckable(True)
+        self.upload_btn.toggled.connect(self._on_upload_toggled)
+        bar.addWidget(self.upload_btn)
+
         bar.addWidget(QLabel("PSD 通道"))
         self.ch_selector = QComboBox()
         self.ch_selector.addItems(self.source.channel_names)
@@ -224,6 +233,27 @@ class MainWindow(QMainWindow):
         if out:
             self.info_label.setText(f"已保存: {os.path.basename(out)}")
 
+    def _on_upload_toggled(self, checked):
+        if checked:
+            self._start_upload()
+        else:
+            self._stop_upload()
+
+    def _start_upload(self):
+        r = self.cfg.remote
+        self.uploader = StreamUploader(r.upload_url, participant=r.participant)
+        self.uploader.set_meta(self.source.sample_rate, self.source.channel_names)
+        self.uploader.start()
+        self.upload_btn.setText("📤 上传中…")
+        self.info_label.setText(f"上传到 {r.upload_url}（参与者：{r.participant}）")
+
+    def _stop_upload(self):
+        if self.uploader is not None:
+            self.uploader.close()
+            self.uploader = None
+        self.upload_btn.setText("📤 上传")
+        self.info_label.setText("已停止上传")
+
     def _on_mark_clicked(self):
         if self.recorder is None or not self.recorder.is_recording:
             self.info_label.setText("未在录制，无法标记")
@@ -242,6 +272,9 @@ class MainWindow(QMainWindow):
         if n <= 0:
             return
         chunk = self.source.read(n)
+        # 远程上传：把原始 µV 块镜像发出去（非阻塞，内部队列 + 后台线程）
+        if self.uploader is not None and self.uploader.is_connected:
+            self.uploader.send(chunk)
         filtered = self.dsp.process(chunk)
         self.waveform.push(filtered)
         # 累积原始数据（供电极接触检测），长度与波形窗一致
@@ -319,6 +352,12 @@ class MainWindow(QMainWindow):
                 self.recorder.stop()
             finally:
                 self.recorder = None
+        # 若正在上传，断开连接
+        if self.uploader is not None:
+            try:
+                self.uploader.close()
+            finally:
+                self.uploader = None
         self.source.stop()
         super().closeEvent(event)
 

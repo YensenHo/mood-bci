@@ -65,3 +65,11 @@ viz:
   window_seconds: 5.0      # 波形滚动窗长（秒）
   refresh_ms: 50           # UI 刷新周期（毫秒）
   channel_spacing_uv: 80.0 # 堆叠波形每通道的显示间距（µV）
+
+# ===== 远程上传（参与者端：把数据实时发到我的电脑）=====
+# 采集界面里点「📤 上传」按钮，数据就实时发到下面这个地址。
+# upload_url 填我的电脑地址（局域网 IP / Tailscale IP / 内网穿透暴露的 wss:// 地址）。
+remote:
+  upload_enabled: false                    # true = 启动采集软件就自动开始上传（一般保持 false，手动点按钮）
+  upload_url: "ws://127.0.0.1:8765"        # ⚠️ 改成我的电脑真实地址
+  participant: "被试"                       # 参与者名字，我这边监控端会显示

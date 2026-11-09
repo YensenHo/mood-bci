@@ -10,12 +10,28 @@ from __future__ import annotations
 import os
 import sys
 
+from eegscope import _runtime
 from eegscope.app import run_app
 from eegscope.config import load_config
 from eegscope.sources import make_source
 
-DEFAULT_CONFIG = os.path.join(os.path.dirname(os.path.abspath(__file__)),
-                              "config.yaml")
+DEFAULT_CONFIG = _runtime.resource_path("config.yaml")
+
+
+def _show_frozen_error(message: str) -> None:
+    """打包版（无控制台）里，把启动失败弹成 GUI 对话框。
+
+    窗口化的 exe 看不到 print 输出，直接退出会变成「点了没反应 / 一闪而过」，
+    所以失败时弹个看得见的错误框。dev 模式（有终端）不弹，照旧 print。
+    """
+    if not _runtime.IS_FROZEN:
+        return
+    try:
+        from PySide6.QtWidgets import QApplication, QMessageBox
+        app = QApplication.instance() or QApplication(sys.argv)
+        QMessageBox.critical(None, "eegscope 启动失败", message)
+    except Exception:  # noqa: BLE001
+        pass
 
 
 def _friendly_source_error() -> int:
@@ -39,15 +55,23 @@ def _friendly_source_error() -> int:
         print("     .venv\\Scripts\\python scripts\\detect_boards.py")
     else:
         print("     .venv/bin/python scripts/detect_boards.py")
+    _show_frozen_error(
+        "没连上采集板。请检查：\n"
+        "  1. 板子有没有开机（按蓝键，绿灯常亮）\n"
+        "  2. USB 有没有插好\n"
+        "  3. Windows 是否装好 STM32 驱动（回到启动器点「🛠 一键修复缺的东西」）\n"
+        "  4. Mac 请用 USB-A 转接头（Type-C 直连可能不识别）")
     return 1
 
 
-def main() -> int:
-    path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_CONFIG
+def run(config_path: str | None = None) -> int:
+    """跑采集软件。config_path 为 None 时用默认 config.yaml。"""
+    path = config_path or DEFAULT_CONFIG
     try:
         cfg = load_config(path)
     except FileNotFoundError:
         print(f"❌ 找不到配置文件：{path}")
+        _show_frozen_error(f"找不到配置文件：{path}")
         return 1
 
     # 数据源（真实板要串口；合成源无需硬件）
@@ -70,6 +94,11 @@ def main() -> int:
           f"（{source.n_channels} 通道）")
     run_app(cfg, source)
     return 0
+
+
+def main() -> int:
+    path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_CONFIG
+    return run(path)
 
 
 if __name__ == "__main__":

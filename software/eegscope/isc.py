@@ -1,94 +1,86 @@
-"""ISC（跨被试同步 inter-subject correlation）骨架。
+"""跨被试同步 ISC（inter-subject correlation）—— 神经电影学主指标。
 
-ISC 是项目主指标（HARNESS「📊 指标」）：N 个观众看同一刺激时，同一导联的
-脑电随时间变化应高度同步；同步峰 = 抓人点，谷 = 掉点。
+神经电影学（Hasson 2004/2008）的核心：N 个观众看同一部片，算他们同一导联
+脑电时间序列的 Pearson 相关。同步高 = 片子这一刻"抓住"了所有人的大脑
+（抓人点/共鸣点）；同步低 = 掉点。它测的是"群体共鸣/投入度"，不是个体情绪。
 
-本模块只做相关性计算，**不做分类、不需要被试内 baseline 校准**（ISC 本身是
-相对的），天然绕开 HARNESS P1（情绪不做跨被试裸预测）。
+用法（监控端）：
+    isc = IscAnalyzer(fs=250, n_channels=8, window_seconds=5.0)
+    for participant, chunk in 收到各参与者数据块:
+        isc.add(participant, chunk)
+    per_ch, summary, n_pairs = isc.compute()   # per_ch=(n_ch,), summary=跨通道均值
 
-接口约定（留给以后接多被试对齐数据）：
-  - `signals`：list[np.ndarray (n_ch, n)]，N 个被试、同长度、同通道，
-    **已由上层对齐到同一时间轴 / 同一刺激起点**（对齐本身不在本模块做）。
-  - 返回 `(t_axis, isc_curve)`：t_axis 为窗口中心时间（秒），isc_curve 为
-    对应窗口的 ISC 值。
+对齐假设：所有参与者用同一硬件（同 fs）、同一时间点开始播放/采集，故按"最新
+样本对齐"（各自缓冲的末尾对齐）。若参与者起播时间差异大，需引入片段时间码做
+对齐（后续版本）。
 """
 from __future__ import annotations
+
+from itertools import combinations
 
 import numpy as np
 
 
-def _pairwise_channel_corr(xi: np.ndarray, xj: np.ndarray) -> np.ndarray:
-    """两个被试同一时间窗 (n_ch, n_win) 的逐导联皮尔逊相关，返回 (n_ch,)。
+class IscAnalyzer:
+    def __init__(self, fs: float, n_channels: int,
+                 window_seconds: float = 5.0, channel_names: list | None = None):
+        self.fs = float(fs)
+        self.n_channels = int(n_channels)
+        self.window = max(1, int(self.fs * window_seconds))
+        self.channel_names = [str(c) for c in (channel_names or [])] or \
+            [f"ch{i + 1}" for i in range(self.n_channels)]
+        self._bufs: dict[str, np.ndarray] = {}
 
-    手动实现 Pearson r（等价 np.corrcoef 的对角外元素），并对常数信号（方差 0）
-    返回 0，避免除零 / NaN。
-    """
-    xi = xi - xi.mean(axis=1, keepdims=True)
-    xj = xj - xj.mean(axis=1, keepdims=True)
-    num = np.sum(xi * xj, axis=1)
-    den = np.sqrt(np.sum(xi * xi, axis=1) * np.sum(xj * xj, axis=1))
-    r = np.zeros(xi.shape[0], dtype=np.float64)
-    mask = den > 0
-    r[mask] = num[mask] / den[mask]
-    return np.clip(r, -1.0, 1.0)
+    @property
+    def participants(self) -> list:
+        return list(self._bufs.keys())
 
+    def add(self, participant: str, chunk) -> None:
+        """追加一块 (n_ch, n) µV 数据到该参与者的滚动缓冲（超窗裁最旧）。"""
+        chunk = np.asarray(chunk, dtype=np.float64)
+        if chunk.ndim == 1:
+            chunk = chunk[None, :]
+        if chunk.shape[0] != self.n_channels or chunk.shape[1] == 0:
+            return
+        buf = self._bufs.get(participant)
+        if buf is None or buf.shape[1] == 0:
+            buf = chunk.copy()
+        else:
+            buf = np.concatenate([buf, chunk], axis=1)
+        if buf.shape[1] > self.window:
+            buf = buf[:, -self.window:]
+        self._bufs[participant] = buf
 
-def compute_isc(signals, fs, window_sec=5.0, step_sec=1.0):
-    """计算时间分辨的跨被试同步 ISC。
+    def compute(self):
+        """算每个通道的成对平均 ISC。
 
-    参数
-    ----
-    signals : list[np.ndarray]
-        N 个被试的信号，每个 shape (n_ch, n)，同长度、同通道、已对齐到同一
-        时间轴 / 同一刺激。
-    fs : float
-        采样率（Hz）。
-    window_sec : float
-        滑动窗长（秒），默认 5.0。
-    step_sec : float
-        滑动步长（秒），默认 1.0。
+        返回 (isc_per_ch, summary, n_pairs)：
+          isc_per_ch: (n_ch,) 每个通道的成对平均 Pearson 相关（-1~1）
+          summary: 跨通道平均 ISC（单个"同步度"数字）
+          n_pairs: 参与的两两配对数
+        少于 2 个参与者或数据不足 0.5s 时返回 (None, None, 0)。
+        """
+        parts = list(self._bufs.keys())
+        if len(parts) < 2:
+            return None, None, 0
+        min_len = min(self._bufs[p].shape[1] for p in parts)
+        if min_len < self.fs * 0.5:
+            return None, None, 0
+        # 按"最新样本"对齐（末尾对齐），因为各参与者都在实时看同一进度
+        signals = [self._bufs[p][:, -min_len:] for p in parts]
+        pairs = list(combinations(range(len(parts)), 2))
 
-    返回
-    ----
-    (t_axis, isc_curve) : (np.ndarray, np.ndarray)
-        t_axis 为各窗中心时间（秒），isc_curve 为对应 ISC 值。
-    """
-    signals = [np.asarray(s, dtype=np.float64) for s in signals]
-    if not signals:
-        raise ValueError("signals 不能为空（至少 1 个被试）")
+        isc_ch = np.zeros(self.n_channels)
+        for c in range(self.n_channels):
+            rs = []
+            for a, b in pairs:
+                x = signals[a][c] - signals[a][c].mean()
+                y = signals[b][c] - signals[b][c].mean()
+                denom = np.sqrt(float((x * x).sum()) * float((y * y).sum()))
+                rs.append(0.0 if denom < 1e-12 else float((x * y).sum() / denom))
+            isc_ch[c] = float(np.mean(rs))
+        summary = float(np.mean(isc_ch))
+        return isc_ch, summary, len(pairs)
 
-    n_ch, n = signals[0].shape
-    for s in signals:
-        if s.ndim != 2:
-            raise ValueError("每个被试信号必须是 (n_ch, n) 二维数组")
-        if s.shape != (n_ch, n):
-            raise ValueError("所有被试信号必须同 shape（同导联、同长度）")
-
-    fs = float(fs)
-    window = int(round(window_sec * fs))
-    step = int(round(step_sec * fs))
-    if window < 2:
-        raise ValueError(f"窗口太小（{window} 样本），需 ≥ 2 样本才能算相关")
-    if step < 1:
-        raise ValueError("步长必须 ≥ 1 样本")
-    if window > n:
-        raise ValueError(f"窗长（{window} 样本）超过数据长度（{n} 样本）")
-
-    # 所有被试对（无向，去重）
-    n_subj = len(signals)
-    pairs = [(i, j) for i in range(n_subj) for j in range(i + 1, n_subj)]
-
-    t_axis = []
-    isc_curve = []
-    for start in range(0, n - window + 1, step):
-        end = start + window
-        vals = []
-        for i, j in pairs:
-            # 同导联两两相关（每导联单独算，再平均）
-            r_per_ch = _pairwise_channel_corr(
-                signals[i][:, start:end], signals[j][:, start:end])
-            vals.extend(float(v) for v in r_per_ch)
-        isc_curve.append(float(np.mean(vals)))
-        t_axis.append((start + window / 2.0) / fs)
-
-    return np.asarray(t_axis, dtype=np.float64), np.asarray(isc_curve, dtype=np.float64)
+    def clear(self) -> None:
+        self._bufs.clear()

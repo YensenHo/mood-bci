@@ -34,3 +34,8 @@ RT-BCI产品资料包/2 嵌入式程序/
 *.mov
 *_cache/
 .cache/
+
+# PyInstaller 打包产物（源码在 software/packaging/eegscope.spec）
+build/
+dist/
+.build_venv/

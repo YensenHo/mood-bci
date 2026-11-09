@@ -44,6 +44,10 @@ def make_source(cfg):
             auto = detect_stm32_device_names()
             if auto:
                 ports = auto
+            else:
+                # 配了 "AUTO" 但没扫到任何 STM32 串口：清掉字面 "AUTO"，
+                # 让下面走「没找到串口」的友好报错，而不是拿 "AUTO" 去开串口崩溃。
+                ports = [p for p in ports if str(p).strip().upper() != "AUTO"]
         if not ports:
             raise ValueError(
                 "openbci 数据源没找到串口：config 没配 port/ports，"
@@ -67,4 +71,12 @@ def make_source(cfg):
             channel_names=names, gain_code=gain_code, **common,
         )
 
-    raise ValueError(f"未知数据源类型: {cfg.source.type!r}（当前支持: synthetic, openbci）")
+    if stype == "network":
+        from .network import NetworkSource
+        n = cfg.source.network
+        return NetworkSource(
+            host=n.host, port=n.port,
+            channel_names=cfg.channels, sample_rate=cfg.sample_rate,
+        )
+
+    raise ValueError(f"未知数据源类型: {cfg.source.type!r}（当前支持: synthetic, openbci, network）")

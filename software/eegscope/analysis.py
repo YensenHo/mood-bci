@@ -82,6 +82,7 @@ class EmotionAnalyzer:
     def _empty_result(self):
         return {
             "faa": None, "faa_ok": False,
+            "theta_asymmetry": None,
             "bands": {b: None for b in self.bands},
             "alpha_occipital": None, "beta_alpha_ratio": None,
             "valence": None, "arousal": None,
@@ -112,11 +113,14 @@ class EmotionAnalyzer:
 
         # 分频带功率（每通道积分后跨通道平均）
         alpha_per_ch = None
+        theta_per_ch = None
         for name, (lo, hi) in self.bands.items():
             per_ch = self._integrate(psd, freqs, lo, hi)
             result["bands"][name] = float(np.mean(per_ch))
             if name == "alpha":
                 alpha_per_ch = per_ch
+            elif name == "theta":
+                theta_per_ch = per_ch
 
         # FAA（需要 F3、F4 同时存在）
         i_f3 = self._index(self.faa_channels[0])
@@ -131,6 +135,13 @@ class EmotionAnalyzer:
                 result["note"] = "alpha 功率为 0，无法计算 FAA"
         else:
             result["note"] = "需 F3/F4"
+
+        # 额叶 theta 不对称（效价备选：部分研究用 theta 比 alpha 更敏感，尤其焦虑/回避）
+        if i_f3 is not None and i_f4 is not None and theta_per_ch is not None:
+            t_f3 = theta_per_ch[i_f3]
+            t_f4 = theta_per_ch[i_f4]
+            if t_f3 > 0 and t_f4 > 0:
+                result["theta_asymmetry"] = float(np.log(t_f4) - np.log(t_f3))
 
         # 唤醒度/投入度辅助指标
         beta = result["bands"].get("beta") or 0.0
