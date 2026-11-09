@@ -34,15 +34,21 @@ def make_source(cfg):
     if stype == "openbci":
         from .openbci import OpenBCISource
         from .multiboard import MultiBoardSource
+        from .ports import detect_stm32_device_names
         o = cfg.source.openbci
-        # 端口列表：ports 优先，否则回落到单 port
+        # 端口列表：ports 优先，否则回落到单 port；空或含 "AUTO" → 跨平台自动扫描
         ports = [p for p in (o.ports or []) if p]
         if not ports and o.port:
             ports = [o.port]
+        if not ports or any(str(p).strip().upper() == "AUTO" for p in ports):
+            auto = detect_stm32_device_names()
+            if auto:
+                ports = auto
         if not ports:
             raise ValueError(
-                "openbci 数据源需要配置 port 或 ports（串口设备名），"
-                "先跑 scripts/capture_serial.py 列出串口")
+                "openbci 数据源没找到串口：config 没配 port/ports，"
+                "自动扫描也没发现 STM32 串口。请确认板子开机、USB 插好，"
+                "或先跑 scripts/detect_boards.py 列出串口")
         n_boards = len(ports)
         # 每块板通道数：显式给 n_channels；否则按「channels 长度 / 板数」自动推断
         n_ch_per_board = o.n_channels if o.n_channels > 0 else max(1, len(cfg.channels) // n_boards)

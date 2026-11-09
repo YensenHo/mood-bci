@@ -35,22 +35,11 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
-import serial.tools.list_ports
 
 from eegscope.sources.openbci import OpenBCISource
+from eegscope.sources.ports import detect_stm32_ports
 
-ST_VID = 0x0483  # STMicroelectronics (STM32 USB CDC)
 FULL_SCALE_UV = 187500.0  # gain 24x 满量程 ±187.5 mV
-
-
-def detect_stm32_ports():
-    """扫描所有 STM32 虚拟串口。优先 VID 0x0483 / 描述含 STM32；兜底 usbmodem。"""
-    all_ports = list(serial.tools.list_ports.comports())
-    stm = [p for p in all_ports
-           if p.vid == ST_VID or "STM32" in (p.description or "").upper()]
-    if stm:
-        return stm
-    return [p for p in all_ports if "usbmodem" in p.device]
 
 
 def calibrate_board(port: str, seconds: float = 2.0):

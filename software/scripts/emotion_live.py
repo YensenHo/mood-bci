@@ -6,12 +6,12 @@
 
 用法：.venv/bin/python scripts/emotion_live.py
 """
-import serial.tools.list_ports
 import numpy as np
 from scipy.signal import butter, filtfilt, iirnotch, welch
 import time, sys, os
 sys.path.insert(0, os.path.join(os.path.dirname(os.path.dirname(os.path.abspath(__file__)))))
 from eegscope.sources.openbci import OpenBCISource
+from eegscope.sources.ports import detect_stm32_device_names
 
 
 def bp(x, fs, lo=0.5, hi=45.0, order=4):
@@ -25,8 +25,7 @@ def notch(x, fs, f0=50.0, q=30.0):
 
 
 def main():
-    ports = [p.device for p in serial.tools.list_ports.comports()
-             if p.vid == 0x0483 or "STM32" in (p.description or "").upper()]
+    ports = detect_stm32_device_names()
     if len(ports) != 4:
         print(f"⚠️ 检测到 {len(ports)} 个串口，预期 4 个")
         return 1

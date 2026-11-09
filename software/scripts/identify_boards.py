@@ -23,20 +23,13 @@ import time
 sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
-import serial.tools.list_ports
 
 from eegscope.config import load_config
 from eegscope.sources.openbci import OpenBCISource
+from eegscope.sources.ports import detect_stm32_ports
 
-ST_VID = 0x0483
 # 每块板挑一个容易找到的代表电极（ISC 核心，额/颞/颞/枕各一个）
 REP_ELECTRODES = ["F3", "T7", "T8", "O1"]
-
-
-def detect_stm32_ports():
-    allp = list(serial.tools.list_ports.comports())
-    stm = [p for p in allp if p.vid == ST_VID or "STM32" in (p.description or "").upper()]
-    return stm if stm else [p for p in allp if "usbmodem" in p.device]
 
 
 def channel_rms(data):

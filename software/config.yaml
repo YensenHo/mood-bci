@@ -33,12 +33,12 @@ source:
   # 用真实硬件时：把上面 type 改成 openbci，再填下面几项。
   # 板子到手先跑 scripts/capture_serial.py 抓字节确认协议，再定这几项。
   openbci:
-    port: "/dev/cu.usbmodem6D92508D49871"   # 单板：串口设备（STM32 虚拟串口，capture_serial.py 会列出来）
-    # ports: [                              # 多板（64 通道 = 4 × 16ch）：把上面 port 注释掉，改用 ports 列表
-    #   "/dev/cu.usbmodemAAA",
-    #   "/dev/cu.usbmodemBBB",
-    #   "/dev/cu.usbmodemCCC",
-    #   "/dev/cu.usbmodemDDD",
+    port: "AUTO"   # 单板：填 "AUTO" 自动扫描 STM32 串口（跨平台）；或填具体串口名（如 Windows 的 COM3）
+    # ports: [     # 多板（64 通道 = 4 × 16ch）：把上面 port 注释掉，改用 ports 列表，也可 ["AUTO"]
+    #   "COM3",
+    #   "COM4",
+    #   "COM5",
+    #   "COM6",
     # ]
     baudrate: 115200      # 波特率（USB CDC 虚拟串口，实际不敏感）
     n_channels: 16        # 每块板通道数：8 或 16（16 = 两层各 8，每通道有效采样率 125Hz）。多板时这里仍填「每块板」的通道数

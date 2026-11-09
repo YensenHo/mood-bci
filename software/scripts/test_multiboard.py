@@ -23,16 +23,25 @@ from eegscope.config import load_config
 from eegscope.sources import make_source
 from eegscope.sources.multiboard import MultiBoardSource
 from eegscope.sources.openbci import OpenBCISource
+import eegscope.sources.ports as ports_mod
 
 _HERE = os.path.dirname(os.path.abspath(__file__))
 _ROOT = os.path.dirname(_HERE)
 
 
+def _patch_ports(count):
+    """让 make_source 的 AUTO 自动扫描返回 count 个假串口（headless 测试，不依赖真实硬件）。"""
+    ports_mod.detect_stm32_device_names = lambda: [f"COM{i + 1}" for i in range(count)]
+
+
 def test_config64_builds_64ch():
     cfg = load_config(os.path.join(_ROOT, "config64.yaml"))
     assert len(cfg.channels) == 64, f"config64 应为 64 通道，实为 {len(cfg.channels)}"
-    assert len(cfg.source.openbci.ports) == 4, "config64 应配 4 个串口"
+    # 跨平台：ports 可填 ["AUTO"]（自动扫描）或 4 个真串口
+    assert cfg.source.openbci.ports == ["AUTO"] or len(cfg.source.openbci.ports) == 4, \
+        f"config64 ports 应为 ['AUTO'] 或 4 个串口，实为 {cfg.source.openbci.ports}"
 
+    _patch_ports(4)  # AUTO 自动扫描 → 4 个假串口
     src = make_source(cfg)
     assert isinstance(src, MultiBoardSource), f"应为 MultiBoardSource，实为 {type(src).__name__}"
     assert src.n_channels == 64, f"应为 64 通道，实为 {src.n_channels}"
@@ -74,6 +83,7 @@ def test_read_all_dead_fallback():
 
 def test_single_board_regression():
     cfg = load_config(os.path.join(_ROOT, "config.yaml"))
+    _patch_ports(1)  # 单板 AUTO 自动扫描 → 1 个假串口
     src = make_source(cfg)
     assert isinstance(src, OpenBCISource), "单板(单 port)应仍走 OpenBCISource"
     assert src.n_channels == 16, f"config.yaml 应 16 通道，实为 {src.n_channels}"
