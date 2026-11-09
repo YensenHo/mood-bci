@@ -6,48 +6,62 @@ on:
   workflow_dispatch:
 
 jobs:
-  build:
-    strategy:
-      fail-fast: false
-      matrix:
-        include:
-          - os: windows-latest
-            zip: eegscope-windows.zip
-          - os: macos-latest
-            zip: eegscope-macos.zip
-    runs-on: ${{ matrix.os }}
+  build-windows:
+    runs-on: windows-latest
     steps:
       - uses: actions/checkout@v4
-
       - uses: actions/setup-python@v5
         with:
           python-version: "3.11"
-
       - name: 安装依赖 + PyInstaller
         run: |
           python -m pip install --upgrade pip
           pip install -r software/requirements.txt pyinstaller
-
       - name: PyInstaller 打包
         working-directory: software
         run: python -m PyInstaller --noconfirm --clean packaging/eegscope.spec
-
       - name: 打 zip（直接下载包）
         shell: bash
         working-directory: software/dist
         run: |
           python -c "import shutil; shutil.make_archive('eegscope-release', 'zip', '.', 'eegscope')"
-          mv eegscope-release.zip ${{ matrix.zip }}
-
+          mv eegscope-release.zip eegscope-windows.zip
       - name: 上传构建产物
         uses: actions/upload-artifact@v4
         with:
-          name: ${{ matrix.zip }}
-          path: software/dist/${{ matrix.zip }}
+          name: eegscope-windows.zip
+          path: software/dist/eegscope-windows.zip
+          if-no-files-found: error
+
+  build-macos:
+    runs-on: macos-latest
+    steps:
+      - uses: actions/checkout@v4
+      - uses: actions/setup-python@v5
+        with:
+          python-version: "3.11"
+      - name: 安装依赖 + PyInstaller
+        run: |
+          python -m pip install --upgrade pip
+          pip install -r software/requirements.txt pyinstaller
+      - name: PyInstaller 打包
+        working-directory: software
+        run: python -m PyInstaller --noconfirm --clean packaging/eegscope.spec
+      - name: 打 zip（直接下载包）
+        shell: bash
+        working-directory: software/dist
+        run: |
+          python -c "import shutil; shutil.make_archive('eegscope-release', 'zip', '.', 'eegscope')"
+          mv eegscope-release.zip eegscope-macos.zip
+      - name: 上传构建产物
+        uses: actions/upload-artifact@v4
+        with:
+          name: eegscope-macos.zip
+          path: software/dist/eegscope-macos.zip
           if-no-files-found: error
 
   release:
-    needs: build
+    needs: [build-windows, build-macos]
     if: startsWith(github.ref, 'refs/tags/v')
     runs-on: ubuntu-latest
     permissions:
@@ -57,7 +71,6 @@ jobs:
         with:
           path: artifacts
           merge-multiple: true
-
       - name: 发布 Release（可直接下载的 zip）
         uses: softprops/action-gh-release@v2
         with:
