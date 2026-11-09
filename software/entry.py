@@ -27,6 +27,9 @@ def main() -> int:
     _runtime.ensure_user_configs()
 
     config_path = None
+    if args and args[0] == "--isc":
+        from main import run_isc
+        return run_isc(args[1] if len(args) > 1 else None)
     if args and args[0] == "--app":
         config_path = args[1] if len(args) > 1 else None
     elif args and args[0].endswith((".yaml", ".yml")):
