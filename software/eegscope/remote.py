@@ -143,6 +143,9 @@ class StreamServer:
                     participant = str(meta.get("participant", "未知")) or "未知"
                     with self._lock:
                         self._metas[participant] = meta
+                        if participant not in self._order:
+                            self._order.append(participant)
+                        self._queues.setdefault(participant, queue.Queue())
                         if not self._n_ch_explicit:
                             self._n_ch = len(meta.get("channels") or [])
             except (ValueError, TypeError):
