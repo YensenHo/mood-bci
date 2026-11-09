@@ -34,8 +34,10 @@ class MainWindow(QMainWindow):
                                         cfg.analysis.bands, cfg.analysis.faa_channels)
 
         src_label = "合成数据" if getattr(source, "is_synthetic", False) else "真实硬件"
-        self.setWindowTitle(f"eegscope — 实时脑电可视化 + 情绪分析（{src_label}）")
+        self.setWindowTitle(
+            f"eegscope — 实时脑电可视化 + 情绪分析（{src_label} · {source.n_channels} 通道）")
         self._build_ui()
+        self.info_label.setText(f"{src_label} · {source.n_channels} 通道已就绪")
 
         # 分析/PSD 刷新周期（每 N 次 tick 算一次，约 500ms）
         self._analysis_every = max(1, int(0.5 * 1000 / cfg.viz.refresh_ms))

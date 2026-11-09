@@ -29,6 +29,7 @@ macOS / Linux 自带 CDC 驱动，无需额外安装（macOS 显示为 `/dev/cu.
 
 | 功能 | Windows | macOS / Linux |
 |---|---|---|
+| 环境自检（先跑这个）| `.venv\Scripts\python scripts\check_env.py` | `.venv/bin/python scripts/check_env.py` |
 | 16 通道 GUI | `.venv\Scripts\python main.py config.yaml` | `.venv/bin/python main.py config.yaml` |
 | 64 通道 GUI | `.venv\Scripts\python main.py config64.yaml` | `.venv/bin/python main.py config64.yaml` |
 | 扫串口/校准 | `.venv\Scripts\python scripts\detect_boards.py` | `.venv/bin/python scripts/detect_boards.py` |
