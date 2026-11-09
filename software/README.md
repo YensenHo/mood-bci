@@ -148,4 +148,24 @@ macOS / Linux 自带 CDC 驱动，无需额外安装（macOS 显示为 `/dev/cu.
 
 命令行版（开发者自己用）仍在 `scripts/detect_boards.py` 和 `scripts/identify_boards.py`，逻辑和向导共用同一套 `eegscope/diagnostics.py`。
 
+## 八、ISC 跨被试同步监控（神经电影学主指标）
+
+**场景**：N 个观众看同一部片，各自电脑开「上传」，数据实时传到监控端，算大家大脑的同步度（ISC）。同步高 = 片子这一刻"抓住"了所有人；低 = 掉点。
+
+**监控端启动**（我的电脑，跑 `config_remote.yaml`）：
+
+```bash
+.venv/bin/python main.py --isc config_remote.yaml
+```
+
+窗口里实时显示：
+- **同步度**：跨通道平均 ISC（-1~1），越大越同步。
+- **各通道同步度柱状图**：哪些电极最"同步"（= 这个脑区最能被内容调动）。
+- **在线人数 / 配对数**。
+
+**参与者端**：跟远程采集一样，填好 `remote.upload_url` 指向监控端地址，点「上传」即可。ISC 计算在监控端 `eegscope/isc.py`（成对 Pearson 相关），数据层 `remote.py` 支持多人（每参与者一个队列）。
+
+> 对齐假设：所有参与者用同一硬件（同采样率）、同一时间点开播，按"最新样本对齐"。若起播时间差很大，需要引入片段时间码做精确对齐（后续）。
+
+
 

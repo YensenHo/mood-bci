@@ -96,8 +96,28 @@ def run(config_path: str | None = None) -> int:
     return 0
 
 
+def run_isc(config_path: str | None = None) -> int:
+    """跑 ISC 监控（神经电影学：多人跨被试同步）。config 需 source.type=network。"""
+    path = config_path or DEFAULT_CONFIG
+    try:
+        cfg = load_config(path)
+    except FileNotFoundError:
+        print(f"❌ 找不到配置文件：{path}")
+        _show_frozen_error(f"找不到配置文件：{path}")
+        return 1
+    if getattr(cfg.source, "type", "") != "network":
+        print("[eegscope] ISC 监控需要 network 数据源（用 config_remote.yaml）")
+        return 1
+    from eegscope.isc_monitor import run_isc_monitor
+    run_isc_monitor(cfg)
+    return 0
+
+
 def main() -> int:
-    path = sys.argv[1] if len(sys.argv) > 1 else DEFAULT_CONFIG
+    args = sys.argv[1:]
+    if args and args[0] == "--isc":
+        return run_isc(args[1] if len(args) > 1 else None)
+    path = args[0] if args else DEFAULT_CONFIG
     return run(path)
 
 
