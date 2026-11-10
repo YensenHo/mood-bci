@@ -6,21 +6,19 @@
 
 ## 🚀 新手 5 分钟上手（Windows）
 
-> 📄 **发给用户看的部署指南**：见 **[`Windows部署指南.md`](Windows部署指南.md)** —— 拿到硬件前先做的 3 件事（下载/装驱动/验证打开），照着做，硬件一到手插上就能测。
+> 📄 **发给用户看的部署指南**：见 **[`Windows部署指南.md`](Windows部署指南.md)** —— 下载 + 验证打开，Windows 10/11 免装驱动，照着做，硬件一到手插上就能测。
 
 ### 1. 下载
 
 到右侧 **Releases** 下载最新的 `eegscope-windows.zip`，**解压**到任意文件夹（路径尽量别带中文和空格）。
 
-### 2. 装驱动（一次性，每台电脑装一次）
+### 2. 驱动（Windows 10/11 免装）
 
-把采集板用 USB 插上电脑。第一次插会显示"未知设备"，需要装一次 STM32 虚拟串口驱动，板子才会变成 `COM3 / COM4 / …`。
-
-- 解压后的文件夹里若有 `drivers/` 里的 `.exe`，双击装上即可。
-- 若没有，去 ST 官网下载 **STM32 Virtual COM Port Driver**（包名 STSW-STM32102，需注册登录），装一下即可：
+- **Windows 10 / 11**：**不用装驱动**，板子插上自动识别成 `COM` 口（Windows 自带 inbox 驱动，即插即用）。
+- **Windows 7 / 8 老系统**：去 ST 官网装 STSW-STM32102 驱动：
   https://www.st.com/en/development-tools/stsw-stm32102.html
 
-> macOS / Linux 系统自带驱动，不用装。
+> macOS / Linux 系统自带驱动，也不用装。
 
 ### 3. 运行
 
