@@ -161,9 +161,9 @@ class EmotionPanel(QWidget):
         layout.setContentsMargins(8, 8, 8, 8)
         layout.setSpacing(4)
 
-        title = QLabel("情绪指标（单被试辅助指标）")
-        title.setStyleSheet("font-weight: bold; font-size: 14px; color: #e0e0e0;")
-        layout.addWidget(title)
+        self.title_label = QLabel("情绪指标（单被试辅助指标）")
+        self.title_label.setStyleSheet("font-weight: bold; font-size: 14px; color: #e0e0e0;")
+        layout.addWidget(self.title_label)
 
         self.faa_label = QLabel("FAA = --")
         f = QFont("Menlo")
@@ -179,6 +179,17 @@ class EmotionPanel(QWidget):
         self.theta_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
         self.theta_label.setStyleSheet("color: #888; font-size: 13px;")
         layout.addWidget(self.theta_label)
+
+        # 投入度（中央区 beta/alpha，HARNESS 指标表）+ 枕顶低频（唤醒度相关）
+        self.engagement_label = QLabel("投入度 = --")
+        self.engagement_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.engagement_label.setStyleSheet("color: #888; font-size: 13px;")
+        layout.addWidget(self.engagement_label)
+
+        self.po_lf_label = QLabel("枕顶低频 = --")
+        self.po_lf_label.setAlignment(Qt.AlignmentFlag.AlignCenter)
+        self.po_lf_label.setStyleSheet("color: #888; font-size: 13px;")
+        layout.addWidget(self.po_lf_label)
 
         # 分频带功率条
         bar_layout = QVBoxLayout()
@@ -223,6 +234,12 @@ class EmotionPanel(QWidget):
 
     def update_metrics(self, metrics: dict) -> None:
         """用最新的情绪指标 dict 刷新本面板（不覆盖 QWidget.update()）。"""
+        # 标题：已校准则标 z-score
+        if metrics.get("_calibrated"):
+            self.title_label.setText("情绪指标（单被试辅助指标 · 已校准 z-score）")
+        else:
+            self.title_label.setText("情绪指标（单被试辅助指标）")
+
         # FAA
         faa = metrics.get("faa")
         if metrics.get("faa_ok") and faa is not None:
@@ -242,6 +259,22 @@ class EmotionPanel(QWidget):
         else:
             self.theta_label.setText("θ不对称 = --")
             self.theta_label.setStyleSheet("color: #888; font-size: 13px;")
+
+        # 投入度（中央区 beta/alpha）+ 枕顶低频
+        eng = metrics.get("engagement")
+        if eng is not None:
+            self.engagement_label.setText(f"投入度 = {eng:.2f}")
+            self.engagement_label.setStyleSheet("color: #bbb; font-size: 13px;")
+        else:
+            self.engagement_label.setText("投入度 = --")
+            self.engagement_label.setStyleSheet("color: #888; font-size: 13px;")
+        po_lf = metrics.get("parieto_occipital_lf")
+        if po_lf is not None:
+            self.po_lf_label.setText(f"枕顶低频 = {po_lf:.1f}")
+            self.po_lf_label.setStyleSheet("color: #bbb; font-size: 13px;")
+        else:
+            self.po_lf_label.setText("枕顶低频 = --")
+            self.po_lf_label.setStyleSheet("color: #888; font-size: 13px;")
 
         # 频带功率条（dB）
         bands = metrics.get("bands") or {}

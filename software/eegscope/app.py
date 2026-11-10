@@ -12,7 +12,8 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel,
                                QVBoxLayout, QWidget)
 
 from . import _runtime
-from .analysis import EmotionAnalyzer, band_power_map, welch_psd
+from .analysis import (BaselineCalibrator, EmotionAnalyzer, band_power_map,
+                       welch_psd)
 from .dsp import SignalChain
 from .recorder import SessionRecorder, config_snapshot
 from .remote import StreamUploader
@@ -57,6 +58,9 @@ class MainWindow(QMainWindow):
         self.recorder: SessionRecorder | None = None
         # 远程上传状态（懒初始化，按下「上传」才建 StreamUploader）
         self.uploader: StreamUploader | None = None
+        # 基线校准状态（被试内 baseline，HARNESS P1）
+        self.calibrator = BaselineCalibrator()
+        self._baseline_mode = False
 
     # ---- UI ----
     def _build_ui(self):
@@ -158,6 +162,12 @@ class MainWindow(QMainWindow):
         self.upload_btn.toggled.connect(self._on_upload_toggled)
         bar.addWidget(self.upload_btn)
 
+        # 基线校准（被试内 baseline：记录中性期指标，之后 z-score）
+        self.baseline_btn = QPushButton("基线校准")
+        self.baseline_btn.setCheckable(True)
+        self.baseline_btn.toggled.connect(self._on_baseline_toggled)
+        bar.addWidget(self.baseline_btn)
+
         bar.addWidget(QLabel("PSD 通道"))
         self.ch_selector = QComboBox()
         self.ch_selector.addItems(self.source.channel_names)
@@ -254,6 +264,22 @@ class MainWindow(QMainWindow):
         self.upload_btn.setText("📤 上传")
         self.info_label.setText("已停止上传")
 
+    def _on_baseline_toggled(self, checked):
+        """基线校准：按下开始采集中性期指标，再按结束并算 mean/std。"""
+        if checked:
+            self.calibrator.reset()
+            self._baseline_mode = True
+            self.baseline_btn.setText("基线采集中…")
+            self.info_label.setText("基线采集中：让被试看中性片/静坐，完成后再次点击结束")
+        else:
+            self._baseline_mode = False
+            self.baseline_btn.setText("基线校准")
+            if self.calibrator.finish():
+                self.info_label.setText(
+                    f"基线校准完成（{self.calibrator.n_samples} 样本），指标已转 z-score")
+            else:
+                self.info_label.setText("基线样本不足（<3 帧或全为零），未校准")
+
     def _on_mark_clicked(self):
         if self.recorder is None or not self.recorder.is_recording:
             self.info_label.setText("未在录制，无法标记")
@@ -301,6 +327,13 @@ class MainWindow(QMainWindow):
 
         metrics = self.analyzer.analyze(data)
 
+        # 基线校准（P1 被试内 baseline）：采集中累加样本；已校准则 z-score
+        if self._baseline_mode:
+            self.calibrator.add_sample(metrics)
+        if self.calibrator.calibrated:
+            metrics = self.calibrator.zscore(metrics)
+            metrics["_calibrated"] = True
+
         # 显示层 EMA 平滑（不改变分析器输出的原始指标）
         disp = dict(metrics)
         disp["faa"] = self._ema("faa", metrics["faa"])
@@ -329,8 +362,11 @@ class MainWindow(QMainWindow):
         self.quality.update_quality(raw_win)
 
         if metrics.get("faa_ok"):
-            self.info_label.setText(f"FAA {disp['faa']:+.3f}  "
-                                    f"alpha(枕区) {metrics.get('alpha_occipital', 0):.1f} µV²")
+            if self.calibrator.calibrated:
+                self.info_label.setText(f"FAA z {disp['faa']:+.2f}（已校准）")
+            else:
+                self.info_label.setText(f"FAA {disp['faa']:+.3f}  "
+                                        f"alpha(枕区) {metrics.get('alpha_occipital', 0):.1f} µV²")
         else:
             self.info_label.setText(metrics.get("note", ""))
 

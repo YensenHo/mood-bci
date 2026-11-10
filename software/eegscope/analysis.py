@@ -79,12 +79,24 @@ class EmotionAnalyzer:
                 return i
         return None
 
+    def _central_indices(self):
+        """中央区 C3/C4/Cz/C1/C2/C5/C6（投入度用；排除 CB 小脑、CP 中央顶）。"""
+        return [i for i, nm in enumerate(self.channel_names)
+                if nm.upper().startswith("C")
+                and not nm.upper().startswith(("CB", "CP"))]
+
+    def _parieto_occipital_indices(self):
+        """枕顶区 P*/PO*/O*（枕顶区低频功率用）。"""
+        return [i for i, nm in enumerate(self.channel_names)
+                if nm.upper().startswith(("P", "O"))]
+
     def _empty_result(self):
         return {
             "faa": None, "faa_ok": False,
             "theta_asymmetry": None,
             "bands": {b: None for b in self.bands},
             "alpha_occipital": None, "beta_alpha_ratio": None,
+            "engagement": None, "parieto_occipital_lf": None,
             "valence": None, "arousal": None,
             "note": "",
         }
@@ -112,15 +124,13 @@ class EmotionAnalyzer:
         freqs, psd = welch_psd(sig, self.fs)
 
         # 分频带功率（每通道积分后跨通道平均）
-        alpha_per_ch = None
-        theta_per_ch = None
+        band_per_ch = {}
         for name, (lo, hi) in self.bands.items():
             per_ch = self._integrate(psd, freqs, lo, hi)
             result["bands"][name] = float(np.mean(per_ch))
-            if name == "alpha":
-                alpha_per_ch = per_ch
-            elif name == "theta":
-                theta_per_ch = per_ch
+            band_per_ch[name] = per_ch
+        alpha_per_ch = band_per_ch.get("alpha")
+        theta_per_ch = band_per_ch.get("theta")
 
         # FAA（需要 F3、F4 同时存在）
         i_f3 = self._index(self.faa_channels[0])
@@ -148,6 +158,23 @@ class EmotionAnalyzer:
         alpha = result["bands"].get("alpha") or 0.0
         result["beta_alpha_ratio"] = float(beta / (alpha + 1e-12))
 
+        # 投入度 = 中央区 beta/alpha（HARNESS 指标表：中央区，不是全通道平均）
+        central = self._central_indices()
+        if central and "beta" in band_per_ch and "alpha" in band_per_ch:
+            b_c = float(np.mean(band_per_ch["beta"][central]))
+            a_c = float(np.mean(band_per_ch["alpha"][central]))
+            if a_c > 0:
+                result["engagement"] = float(b_c / a_c)
+
+        # 枕顶区低频功率（delta+theta，唤醒度相关，HARNESS 效价/唤醒度指标之一）
+        po = self._parieto_occipital_indices()
+        if po:
+            lf = 0.0
+            for bname in ("delta", "theta"):
+                if bname in band_per_ch:
+                    lf += float(np.mean(band_per_ch[bname][po]))
+            result["parieto_occipital_lf"] = float(lf)
+
         # 枕区 alpha（通道名以 O 开头）
         occ_idx = [i for i, nm in enumerate(self.channel_names) if nm.upper().startswith("O")]
         if occ_idx and alpha_per_ch is not None:
@@ -159,3 +186,61 @@ class EmotionAnalyzer:
         result["arousal"] = float(np.tanh(result["beta_alpha_ratio"] - 1.0))
 
         return result
+
+
+class BaselineCalibrator:
+    """被试内 baseline 校准（HARNESS P1 强制）。
+
+    记录中性刺激期（闭眼静坐 / 中性片）的指标均值与方差，之后对辅助指标做
+    z-score：``z = (x − μ_baseline) / σ_baseline``。
+
+    只校准辅助指标（FAA、θ不对称、投入度、枕顶低频、唤醒度等）；ISC 本身是
+    相对的（两两相关），不需要 calibration。
+    """
+
+    CALIBRATABLE = (
+        "faa", "theta_asymmetry", "engagement", "parieto_occipital_lf",
+        "beta_alpha_ratio", "alpha_occipital", "valence", "arousal",
+    )
+
+    def __init__(self):
+        self._samples = {k: [] for k in self.CALIBRATABLE}
+        self._stats = {}          # k -> (mean, std)
+        self.calibrated = False
+
+    @property
+    def n_samples(self):
+        return len(self._samples.get("faa", []))
+
+    def add_sample(self, metrics):
+        """累积一帧指标（基线采集阶段每帧调用）。"""
+        for k in self.CALIBRATABLE:
+            v = metrics.get(k)
+            if v is not None and np.isfinite(v):
+                self._samples[k].append(float(v))
+
+    def finish(self):
+        """用已累积样本算各指标 mean/std。样本 <3 或 std=0 的指标不校准。"""
+        self._stats = {}
+        for k, vals in self._samples.items():
+            if len(vals) >= 3:
+                arr = np.asarray(vals, dtype=np.float64)
+                sd = float(arr.std())
+                if sd > 0:
+                    self._stats[k] = (float(arr.mean()), sd)
+        self.calibrated = bool(self._stats)
+        return self.calibrated
+
+    def reset(self):
+        self._samples = {k: [] for k in self.CALIBRATABLE}
+        self._stats = {}
+        self.calibrated = False
+
+    def zscore(self, metrics):
+        """返回 z-score 后的指标副本（未校准/样本不足的指标保留原值）。"""
+        out = dict(metrics)
+        for k, (mu, sd) in self._stats.items():
+            v = metrics.get(k)
+            if v is not None and np.isfinite(v):
+                out[k] = float((v - mu) / sd)
+        return out
