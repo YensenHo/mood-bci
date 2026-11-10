@@ -21,6 +21,8 @@ from datetime import datetime
 
 import numpy as np
 
+from .edfio import write_csv, write_edf
+
 
 def config_snapshot(cfg) -> dict:
     """把 AppConfig 的关键字段转成可 JSON 化的 dict（只取离线分析需要的部分）。"""
@@ -148,6 +150,16 @@ class SessionRecorder:
             fs=np.float32(self.fs),
             channel_names=np.array(self.channel_names),
         )
+
+        # 导出标准格式（主流脑电软件 EEGLAB/MNE 可直接读）：
+        #   - session_raw.edf / session_filtered.edf：EDF+ 标准格式
+        #   - session_raw.csv：OpenBCI 同款 CSV（Excel/Python 可读）
+        write_edf(os.path.join(out_dir, "session_raw.edf"),
+                  raw, self.fs, self.channel_names)
+        write_edf(os.path.join(out_dir, "session_filtered.edf"),
+                  filtered, self.fs, self.channel_names)
+        write_csv(os.path.join(out_dir, "session_raw.csv"),
+                  raw, self.fs, self.channel_names)
 
         meta = {
             "sample_rate": self.fs,
