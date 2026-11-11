@@ -92,7 +92,17 @@ def run(config_path: str | None = None) -> int:
 
     print(f"[eegscope] 数据源就绪：{type(source).__name__} "
           f"（{source.n_channels} 通道）")
-    run_app(cfg, source)
+    try:
+        run_app(cfg, source)
+    except Exception as e:  # 串口打不开（端口变了/换了电脑）等，友好提示而非闪退
+        print(f"[eegscope] 启动采集失败：{e}")
+        _show_frozen_error(
+            f"启动采集失败：{e}\n\n"
+            "常见原因：\n"
+            "1. 换电脑 / 串口变了 → 重新点「🔧 调试向导」识板\n"
+            "2. 板子没开机（按蓝键，绿灯常亮）/ USB 没插好\n"
+            "3. 多块板时，config 里的串口号是之前电脑的")
+        return 1
     return 0
 
 

@@ -85,15 +85,11 @@ channels:
 source:
   type: openbci
   openbci:
-    # 4 块板的串口（板1~板4 顺序必须与上面 channels 分组一致）
-    # 跨平台：填 "AUTO" 自动扫描 STM32 串口（Windows COM / macOS usbmodem / Linux ttyACM）。
-    # 但自动扫描是 USB 枚举顺序，不一定=物理板序；要通道名正确，先跑
-    # scripts/identify_boards.py 摸电极识板，再把 4 个真串口名按板序填回来。
-    ports:
-      - "/dev/cu.usbmodem6D92508D49871"   # 板1 额区
-      - "/dev/cu.usbmodem6D8E4F8D49871"   # 板2 额中央+中央
-      - "/dev/cu.usbmodem6D8E418A49871"   # 板3 中央后+顶
-      - "/dev/cu.usbmodem6D914F9649871"   # 板4 枕区
+    # 4 块板的串口。默认 AUTO = 自动扫描当前电脑的 STM32 串口（跨平台）。
+    # ⚠️ 自动扫描是 USB 枚举顺序，不一定=物理板序（板1/2/3/4）；要通道名对上号，
+    # 在软件里点「🔧 调试向导 → 识板」，它会自动把本机真实串口按板序填回来。
+    # 换电脑 / 换 USB 口后串口会变，重新识板即可。
+    ports: ["AUTO"]
     baudrate: 115200      # USB CDC 虚拟串口，实际不敏感
     n_channels: 16        # 每块板 16 通道
     gain: 24.0            # 缩放用增益
