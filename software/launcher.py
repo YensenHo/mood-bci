@@ -277,6 +277,12 @@ class Launcher(QMainWindow):
             self._set_row("deps", False, f"缺 {len(missing)} 个：{names}")
         if board_ok:
             self._set_row("board", True, f"检测到 {len(ports)} 块板")
+            # 按检测到的板数自动切通道档位：≥4 块 = 64 通道，1 块 = 16 通道。
+            # 否则默认 16 通道 config 接了 4 块板会回落成 ch1..ch64（质量面板/脑地形图全乱）。
+            if len(ports) >= 4:
+                self.ch64.setChecked(True)
+            elif len(ports) == 1:
+                self.ch16.setChecked(True)
         else:
             self._set_row("board", False, "没检测到（可能没插 / 没开机）")
         self._set_row("driver", drv_ok, drv_note)

@@ -467,20 +467,26 @@ class TopographyPanel(QWidget):
     def _render(self, powers):
         powers = np.asarray(powers, dtype=np.float64).ravel()
         # 收集在 CHANNEL_2D 中的通道值，缺失/无坐标的通道跳过（不报错）
-        coords, vals = [], []
+        matched_idx, vals = [], []
         for i, nm in enumerate(self.channel_names):
             key = nm.upper()
             if key in self._xy and i < powers.size:
-                coords.append(self._xy[key])
+                matched_idx.append(i)
                 vals.append(float(powers[i]))
-        if len(coords) < 3:
+        if len(matched_idx) < 3:
             return  # 不足 3 个可定位通道，无法 linear 插值，保持空图
 
         # 归一化：log10(功率) → min-max → [0,1]（对数压缩动态范围，突出空间对比）
         v = np.clip(np.asarray(vals), 1e-12, None)
         logv = np.log10(v)
         lo, hi = float(logv.min()), float(logv.max())
-        norm = (logv - lo) / (hi - lo) if hi - lo > 1e-12 else np.full_like(logv, 0.5)
+        norm_matched = (logv - lo) / (hi - lo) if hi - lo > 1e-12 else np.full_like(logv, 0.5)
+
+        # 映射回「全通道长度」对齐 channel_names（未匹配/无坐标通道留 NaN，
+        # topo_interpolate 只读有坐标的通道，自动跳过 NaN）。之前把「已匹配通道」
+        # 的归一化结果直接按全通道下标传进去，遇到 NC 占位通道就会整体错位。
+        norm = np.full(len(self.channel_names), np.nan)
+        norm[matched_idx] = norm_matched
 
         grid, extent = topo_interpolate(self.channel_names, norm)
         rgba = _grid_to_rgba(grid)
