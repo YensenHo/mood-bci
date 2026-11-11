@@ -60,13 +60,15 @@ def make_source(cfg):
         total_ch = n_ch_per_board * n_boards
         names = cfg.channels if len(cfg.channels) == total_ch else None
         if names is None:
-            # 通道名数量对不上（典型：16 通道 config 接了 4 块板 → 64 通道）。
-            # 用标准 10-20 默认名兜底，保证质量面板显示电极名、脑地形图能定位；
-            # 真实物理接线顺序仍以 config64.yaml 为准。
-            if total_ch == 64:
-                names = list(DEFAULT_CHANNELS_64) + ["NC"] * (64 - len(DEFAULT_CHANNELS_64))
-            elif total_ch == 16:
+            # 通道名数量对不上（如 16 通道 config 接了 2/3/4 块板）。用标准 10-10
+            # 布局兜底，保证质量面板显示电极名、脑地形图能定位；真实物理接线顺序
+            # 仍以 config64.yaml 为准。16 通道用项目标准 16 导；其它按 10-10 布局
+            # 取前缀，不够用 NC 补齐。
+            if total_ch == 16:
                 names = list(DEFAULT_CHANNELS)
+            else:
+                full = list(DEFAULT_CHANNELS_64)
+                names = (full + ["NC"] * total_ch)[:total_ch]
         gain_code = None if o.gain_code < 0 else o.gain_code
         common = dict(baudrate=o.baudrate, gain=o.gain,
                       scale_uv=o.scale_uv if o.scale_uv > 0 else None)
