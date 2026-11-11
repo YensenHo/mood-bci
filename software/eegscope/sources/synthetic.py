@@ -32,7 +32,6 @@ _MIRROR_PAIRS = [
 
 def _channel_kind(name: str) -> str:
     """按 10-20 命名推断通道所在脑区，用于合成信号的空间特征。"""
-    n = name.upper().lstrip("ABCDEFGHIJKLMNOPQRSTUVWXYZ") if False else name.upper()
     n = name.upper()
     if n.startswith("O"):
         return "occipital"

@@ -266,6 +266,8 @@ class MainWindow(QMainWindow):
 
     def _on_baseline_toggled(self, checked):
         """基线校准：按下开始采集中性期指标，再按结束并算 mean/std。"""
+        # 校准切换会改变指标尺度（raw ↔ z-score），清掉旧 EMA，避免新旧值混叠
+        self._ema_state.clear()
         if checked:
             self.calibrator.reset()
             self._baseline_mode = True
@@ -365,8 +367,12 @@ class MainWindow(QMainWindow):
             if self.calibrator.calibrated:
                 self.info_label.setText(f"FAA z {disp['faa']:+.2f}（已校准）")
             else:
-                self.info_label.setText(f"FAA {disp['faa']:+.3f}  "
-                                        f"alpha(枕区) {metrics.get('alpha_occipital', 0):.1f} µV²")
+                ao = metrics.get("alpha_occipital")
+                if ao is not None:
+                    self.info_label.setText(f"FAA {disp['faa']:+.3f}  "
+                                            f"alpha(枕区) {ao:.1f} µV²")
+                else:
+                    self.info_label.setText(f"FAA {disp['faa']:+.3f}")
         else:
             self.info_label.setText(metrics.get("note", ""))
 
