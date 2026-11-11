@@ -178,9 +178,11 @@ def identify_boards(channel_names=None, touch_cb=None, progress_cb=None,
 
 
 def write_ports_to_config(ports, config_path: str):
-    """把 4 个串口名按板1~板4顺序写进 config64.yaml 的 ports:。
+    """把串口名按板1..板4顺序写进 config64.yaml 的 ports:。
 
-    返回 (ok, msg)。用逐行替换，保留原文件注释和格式。
+    兼容三种写法：inline `ports: ["AUTO"]`、多行 `ports:\\n  - "AUTO"`、
+    以及硬编码 `- "/dev/..."`（换电脑前的老 config）。逐行替换，保留注释。
+    返回 (ok, msg)。
     """
     if not os.path.isfile(config_path):
         return False, f"找不到配置文件：{config_path}"
@@ -188,17 +190,25 @@ def write_ports_to_config(ports, config_path: str):
         lines = f.readlines()
 
     out = []
+    i = 0
     done = False
-    for line in lines:
-        if not done and "AUTO" in line and line.lstrip().startswith("-"):
+    while i < len(lines):
+        line = lines[i]
+        if not done and line.strip().startswith("ports:"):
             indent = line[: len(line) - len(line.lstrip())]
-            for i, p in enumerate(ports, 1):
-                out.append(f'{indent}- "{p}"   # 板{i}\n')
+            i += 1  # 跳过 ports: 这一行（inline 值也在这行，一并跳过）
+            while i < len(lines) and lines[i].lstrip().startswith("-"):
+                i += 1  # 跳过多行写法里后续的 - "..." 行
+            out.append(f"{indent}ports:\n")
+            for bi, p in enumerate(ports, 1):
+                out.append(f'{indent}  - "{p}"   # 板{bi}\n')
             done = True
-        else:
-            out.append(line)
+            continue
+        out.append(line)
+        i += 1
+
     if not done:
-        return False, "没找到 ports: 里的 AUTO（config 结构变了？）"
+        return False, "没找到 ports: 配置（config 结构变了？）"
     with open(config_path, "w", encoding="utf-8") as f:
         f.writelines(out)
-    return True, f"已把 4 个串口按板序写进 {os.path.basename(config_path)}"
+    return True, f"已把 {len(ports)} 个串口按板序写进 {os.path.basename(config_path)}"
