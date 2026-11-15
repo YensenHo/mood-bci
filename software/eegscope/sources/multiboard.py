@@ -90,3 +90,11 @@ class MultiBoardSource(DataSource):
     def board_ports(self):
         """返回各板串口（调试/日志用）。"""
         return list(self._ports)
+
+    def board_stats(self) -> list:
+        """返回各板的帧级同步统计（顺序 = ports 顺序，即物理板序）。
+
+        用于时间同步地基：每块板自己的帧编号 + 接收时间 + 估计丢帧数。
+        注意：各板独立 STM32/独立采样时钟，接收时间是「电脑收到」而非「设备采样」。
+        """
+        return [b.frame_stats() for b in self._boards]

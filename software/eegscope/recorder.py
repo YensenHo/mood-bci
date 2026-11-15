@@ -67,12 +67,17 @@ class SessionRecorder:
     """
 
     def __init__(self, sample_rate, channel_names, source_type="unknown",
-                 config_snapshot=None, recordings_dir="recordings"):
+                 config_snapshot=None, recordings_dir="recordings",
+                 timeline=None):
         self.fs = float(sample_rate)
         self.channel_names = [str(c) for c in channel_names]
         self.source_type = str(source_type)
         self.config_snapshot = dict(config_snapshot or {})
         self.recordings_dir = str(recordings_dir)
+        # 时间同步时间线（可选）：追加式记录 eeg_frame / eye_sample / stimulus 事件。
+        # 由上层传入同一个 SyncTimeline 实例，录制结束时随会话一起落盘。
+        self.timeline = timeline
+        self._board_stats_log: list = []   # 每块板帧统计的周期快照
         self.reset()
 
     # ---- 状态 ----
@@ -83,6 +88,7 @@ class SessionRecorder:
         self._started_at: datetime | None = None
         self._recording = False
         self.markers: list = []
+        self._board_stats_log: list = []
 
     @property
     def is_recording(self) -> bool:
@@ -122,6 +128,18 @@ class SessionRecorder:
         m = {"time_s": round(self.elapsed_seconds, 6), "label": str(label)}
         self.markers.append(m)
         return m
+
+    def record_board_stats(self, board_stats: list) -> None:
+        """周期快照每块板的帧统计（丢帧/接收时间），供时间同步层事后分析。
+
+        board_stats = MultiBoardSource.board_stats() 返回的 list（每板一个 dict）。
+        录制外调用忽略。快照只追加、不覆盖原始帧统计。
+        """
+        if not self._recording:
+            return
+        snap = {"t_recv": round(self.elapsed_seconds, 6),
+                "boards": [dict(s) for s in (board_stats or [])]}
+        self._board_stats_log.append(snap)
 
     def stop(self):
         """停止录制并落盘。返回保存目录；无数据或未在录制时返回 None。"""
@@ -173,4 +191,18 @@ class SessionRecorder:
         }
         with open(os.path.join(out_dir, "meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
+
+        # 时间同步元数据（若接了 SyncTimeline）：追加式事件时间线 + 每板帧统计快照。
+        # 原始记录不可覆盖（只读追加），区分「设备采样时间」与「电脑接收时间」。
+        if self.timeline is not None:
+            sync = {
+                "timeline": self.timeline.events(),
+                "timeline_summary": self.timeline.summary(),
+                "board_stats_snapshots": self._board_stats_log,
+                "clock_note": ("所有 t_recv 均为电脑 time.monotonic() 相对录制起点的秒数，"
+                               "是接收时间，不是设备精确采样时间；设备采样时间见"
+                               " sample_counter / device_ts 字段。"),
+            }
+            with open(os.path.join(out_dir, "sync.json"), "w", encoding="utf-8") as f:
+                json.dump(sync, f, ensure_ascii=False, indent=2)
         return out_dir

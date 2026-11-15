@@ -133,6 +133,19 @@ class OpenBCISource(DataSource):
         self._stop_event = threading.Event()
         self._queue = queue.Queue()
 
+        # 帧级同步统计（时间同步地基）：记录设备侧帧编号 + 电脑接收单调时间 + 估计丢帧。
+        # sample_counter 语义：byte1 = 协议帧计数（0~255 回绕）；
+        #   8ch 时每帧 +1；16ch 有线 Daisy 时 bit0 分前后 8 通道，每两帧拼一个完整样本。
+        # 这里只忠实记录 byte1 与接收时间，不冒充精确采样时刻。
+        self._frame_stats = {
+            "n_frames": 0,             # 累计收到帧数
+            "n_dropped_est": 0,        # 估计丢帧数（帧编号跳变累计）
+            "last_counter": -1,        # 最后 byte1 帧编号
+            "first_recv_s": None,      # 首帧接收单调时间（time.monotonic）
+            "last_recv_s": None,       # 末帧接收单调时间
+            "last_drop_s": None,       # 最近一次丢帧的接收单调时间
+        }
+
     # ---- DataSource 接口 ----
     @property
     def sample_rate(self) -> float:
@@ -245,6 +258,7 @@ class OpenBCISource(DataSource):
             except Exception:
                 break
             for frame in scanner.feed(raw):
+                self._update_frame_stats(frame[1], time.monotonic())
                 ch = parse_cyton_frame(frame, self._gain, self._scale)
                 if not self._daisy:
                     self._queue.put(ch)
@@ -255,6 +269,31 @@ class OpenBCISource(DataSource):
                     elif pending_main is not None:
                         self._queue.put(np.concatenate([pending_main, ch]))
                         pending_main = None
+
+    def _update_frame_stats(self, counter: int, recv_monotonic: float) -> int:
+        """更新帧统计，返回本帧相对上一帧的估计丢帧数。
+
+        counter = byte1 帧编号（0~255 回绕）。相邻帧编号若跳变 >1，
+        差值-1 即估计丢帧数（mod 256，把回绕算进去）。
+        """
+        s = self._frame_stats
+        dropped = 0
+        if s["last_counter"] >= 0:
+            gap = (counter - s["last_counter"] - 1) % 256
+            dropped = int(gap)
+            if dropped:
+                s["n_dropped_est"] += dropped
+                s["last_drop_s"] = recv_monotonic
+        s["last_counter"] = int(counter)
+        s["n_frames"] += 1
+        if s["first_recv_s"] is None:
+            s["first_recv_s"] = recv_monotonic
+        s["last_recv_s"] = recv_monotonic
+        return dropped
+
+    def frame_stats(self) -> dict:
+        """返回帧级同步统计快照（供录制/同步层读取，只读）。"""
+        return dict(self._frame_stats)
 
 
 def list_ports():
