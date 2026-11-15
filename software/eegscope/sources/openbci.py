@@ -26,6 +26,7 @@
 """
 from __future__ import annotations
 
+import collections
 import queue
 import threading
 import time
@@ -133,18 +134,27 @@ class OpenBCISource(DataSource):
         self._stop_event = threading.Event()
         self._queue = queue.Queue()
 
-        # 帧级同步统计（时间同步地基）：记录设备侧帧编号 + 电脑接收单调时间 + 估计丢帧。
-        # sample_counter 语义：byte1 = 协议帧计数（0~255 回绕）；
-        #   8ch 时每帧 +1；16ch 有线 Daisy 时 bit0 分前后 8 通道，每两帧拼一个完整样本。
-        # 这里只忠实记录 byte1 与接收时间，不冒充精确采样时刻。
+        # 帧级同步统计（时间同步地基）：记录设备侧帧编号 + 电脑接收单调时间 + 丢帧分类。
+        # byte1 帧编号语义（RT-BCI 协议文档）：
+        #   - 8ch：byte1 = 样本计数（0~255 回绕），每帧 +1。
+        #   - 16ch 有线 Daisy：byte1 bit0 = 前/后 8 通道（0=前8，1=后8），bit1~7 = 样本计数
+        #     （0~127 回绕），每两帧拼一个完整样本，byte1 仍每帧 +1。
+        #   - 16ch Wi-Fi：两包相同帧号（HTTP/TCP 传输，本串口驱动不覆盖，见评估报告）。
+        # 这里按「byte1 每帧 +1（mod 256）」做帧级丢帧检测；样本级语义见评估报告。
         self._frame_stats = {
             "n_frames": 0,             # 累计收到帧数
-            "n_dropped_est": 0,        # 估计丢帧数（帧编号跳变累计）
+            "n_dropped_est": 0,        # 估计丢帧数（帧编号跳变，mod 256）
+            "n_dup_or_unknown": 0,     # 重复帧 或 整圈丢失（diff=0，无法区分）
+            "n_out_of_order": 0,       # 乱序/重启（diff>=128，回退太多）
             "last_counter": -1,        # 最后 byte1 帧编号
             "first_recv_s": None,      # 首帧接收单调时间（time.monotonic）
             "last_recv_s": None,       # 末帧接收单调时间
-            "last_drop_s": None,       # 最近一次丢帧的接收单调时间
+            "last_gap_s": None,        # 最近一次丢帧的接收单调时间
         }
+        # 逐帧记录（有界，供长时间录制周期 drain）：(byte1 帧编号, 接收单调时间)。
+        # 时间戳语义：一次串口 read() 可能带回多帧，这些帧共享同一个 read 返回后的
+        # time.monotonic()（=「批次接收时间」），是到达时间的上界，不是逐帧精确到达时刻。
+        self._frame_log: collections.deque = collections.deque(maxlen=65536)
 
     # ---- DataSource 接口 ----
     @property
@@ -239,9 +249,16 @@ class OpenBCISource(DataSource):
                 out.append(self._queue.get(timeout=0.05))
             except queue.Empty:
                 continue
+        # 记录本次读取的缺口（请求 n 样本、实际拿到 len(out)），
+        # 掉线/欠采时缺口 >0，供录制层标记时间缺口，不把补零误当连续数据。
+        self._last_read_gap = max(0, n - len(out))
         if not out:
-            return np.zeros((self._n_ch, 1), dtype=np.float64)  # 掉线兜底
+            return np.zeros((self._n_ch, 1), dtype=np.float64)  # 掉线兜底（零填充）
         return np.stack(out, axis=1).astype(np.float64)
+
+    def last_read_gap(self) -> int:
+        """上次 read() 的样本缺口（请求数 − 实际拿到数）。0 = 无缺口。"""
+        return int(getattr(self, "_last_read_gap", 0))
 
     # ---- 后台读串口线程 ----
     def _reader_loop(self) -> None:
@@ -270,30 +287,52 @@ class OpenBCISource(DataSource):
                         self._queue.put(np.concatenate([pending_main, ch]))
                         pending_main = None
 
-    def _update_frame_stats(self, counter: int, recv_monotonic: float) -> int:
-        """更新帧统计，返回本帧相对上一帧的估计丢帧数。
+    def _update_frame_stats(self, counter: int, recv_monotonic: float) -> dict:
+        """更新帧统计，返回本帧的丢帧分类（mod 256）。
 
-        counter = byte1 帧编号（0~255 回绕）。相邻帧编号若跳变 >1，
-        差值-1 即估计丢帧数（mod 256，把回绕算进去）。
+        分类（counter = byte1，0~255 回绕）：
+          - diff == 0：重复帧 或 整圈丢失（丢 256 帧回到同值），**无法区分** → dup_or_unknown
+          - diff == 1：正常（下一帧）
+          - 2 <= diff < 128：丢 diff-1 帧 → dropped
+          - diff >= 128：回退太多 = 乱序/重启 → out_of_order（不计入丢帧）
+        把「估计值」和「无法区分」分开记，不把估计冒充准确值。
         """
         s = self._frame_stats
-        dropped = 0
+        cls = "first"
         if s["last_counter"] >= 0:
-            gap = (counter - s["last_counter"] - 1) % 256
-            dropped = int(gap)
-            if dropped:
-                s["n_dropped_est"] += dropped
-                s["last_drop_s"] = recv_monotonic
+            diff = (counter - s["last_counter"]) % 256
+            if diff == 0:
+                cls = "dup_or_unknown"
+                s["n_dup_or_unknown"] += 1
+            elif diff == 1:
+                cls = "normal"
+            elif diff < 128:
+                cls = "dropped"
+                s["n_dropped_est"] += diff - 1
+                s["last_gap_s"] = recv_monotonic
+            else:
+                cls = "out_of_order"
+                s["n_out_of_order"] += 1
         s["last_counter"] = int(counter)
         s["n_frames"] += 1
         if s["first_recv_s"] is None:
             s["first_recv_s"] = recv_monotonic
         s["last_recv_s"] = recv_monotonic
-        return dropped
+        self._frame_log.append((int(counter), recv_monotonic))
+        return {"diff_class": cls, "counter": int(counter)}
 
     def frame_stats(self) -> dict:
         """返回帧级同步统计快照（供录制/同步层读取，只读）。"""
         return dict(self._frame_stats)
+
+    def drain_frame_log(self) -> list:
+        """取出并清空逐帧记录（(byte1 帧编号, 接收单调时间) 列表），供录制层周期落盘。
+
+        有界 deque（maxlen 65536），长时间录制要周期 drain，否则只保留最近一截。
+        """
+        out = list(self._frame_log)
+        self._frame_log.clear()
+        return out
 
 
 def list_ports():

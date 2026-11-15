@@ -82,10 +82,22 @@ class MultiBoardSource(DataSource):
             return np.zeros((self._n_ch, 0), dtype=np.float64)
         # 逐板读，按最小样本数对齐（各板独立时钟，漂移/掉线时样本数可能不等）
         chunks = [b.read(n) for b in self._boards]
-        min_len = min(c.shape[1] for c in chunks)
+        lengths = [c.shape[1] for c in chunks]
+        min_len = min(lengths)
+        # 记录本次读取的截断信息：每板比 min_len 多出的样本数（这些被丢弃，不静默吞掉）。
+        self._last_truncated = [int(L - min_len) for L in lengths]
+        # 记录每板自身的读缺口（该板请求 n、实际拿到的不足部分）。
+        self._last_board_gaps = [int(b.last_read_gap()) for b in self._boards]
         if min_len == 0:
             return np.zeros((self._n_ch, 1), dtype=np.float64)  # 全部掉线兜底
         return np.concatenate([c[:, :min_len] for c in chunks], axis=0)
+
+    def read_gap_info(self) -> dict:
+        """返回上次 read() 的缺口/截断信息（供录制层标记时间缺口，不静默丢样本）。"""
+        return {
+            "per_board_gap": list(getattr(self, "_last_board_gaps", [0] * len(self._boards))),
+            "per_board_truncated": list(getattr(self, "_last_truncated", [0] * len(self._boards))),
+        }
 
     def board_ports(self):
         """返回各板串口（调试/日志用）。"""
@@ -98,3 +110,7 @@ class MultiBoardSource(DataSource):
         注意：各板独立 STM32/独立采样时钟，接收时间是「电脑收到」而非「设备采样」。
         """
         return [b.frame_stats() for b in self._boards]
+
+    def drain_frame_logs(self) -> list:
+        """drain 各板的逐帧记录（每板 list of (byte1 帧编号, 接收单调时间)）。"""
+        return [b.drain_frame_log() for b in self._boards]

@@ -17,6 +17,7 @@ from .analysis import (BaselineCalibrator, EmotionAnalyzer, band_power_map,
 from .dsp import SignalChain
 from .recorder import SessionRecorder, config_snapshot
 from .remote import StreamUploader
+from .sync import SyncTimeline
 from .viz import (EmotionPanel, QualityPanel, SpectrogramPanel, SpectrumPanel,
                   TopographyPanel, WaveformPanel, setup_theme)
 
@@ -25,10 +26,12 @@ _RECORDINGS_DIR = _runtime.data_dir("recordings")
 
 
 class MainWindow(QMainWindow):
-    def __init__(self, cfg, source):
+    def __init__(self, cfg, source, eye_tracker=None):
         super().__init__()
         self.cfg = cfg
         self.source = source
+        # 眼动仪（可选）：真实设备或模拟器；无则 None，眼动样本不记录。
+        self.eye_tracker = eye_tracker
 
         self.dsp = SignalChain(cfg.sample_rate, cfg.dsp.bandpass_hz,
                                cfg.dsp.notch_hz, cfg.dsp.notch_q)
@@ -56,6 +59,8 @@ class MainWindow(QMainWindow):
 
         # 会话录制状态（懒初始化，按下「录制」才建 SessionRecorder）
         self.recorder: SessionRecorder | None = None
+        # 时间同步时间线（录制时随 SessionRecorder 一起落盘 sync.json）
+        self.timeline = SyncTimeline()
         # 远程上传状态（懒初始化，按下「上传」才建 StreamUploader）
         self.uploader: StreamUploader | None = None
         # 基线校准状态（被试内 baseline，HARNESS P1）
@@ -219,12 +224,21 @@ class MainWindow(QMainWindow):
             self._stop_recording()
 
     def _start_recording(self):
+        # 新建一条时间线（每次录制独立起点），并（可选）启动眼动仪
+        self.timeline = SyncTimeline()
+        self.timeline.start()
+        if self.eye_tracker is not None:
+            try:
+                self.eye_tracker.start()
+            except Exception as e:
+                self.info_label.setText(f"眼动仪启动失败：{e}")
         self.recorder = SessionRecorder(
             self.cfg.sample_rate,
             self.source.channel_names,
             source_type=type(self.source).__name__,
             config_snapshot=config_snapshot(self.cfg),
             recordings_dir=_RECORDINGS_DIR,
+            timeline=self.timeline,
         )
         self.recorder.start()
         self.record_btn.setText("停止录制")
@@ -233,6 +247,12 @@ class MainWindow(QMainWindow):
     def _stop_recording(self):
         if self.recorder is None:
             return
+        # 先停眼动仪（若在跑）
+        if self.eye_tracker is not None:
+            try:
+                self.eye_tracker.stop()
+            except Exception:
+                pass
         out = self.recorder.stop()
         self.recorder = None
         # 复位按钮（blockSignals 防止再次触发 toggled 递归）
@@ -292,6 +312,42 @@ class MainWindow(QMainWindow):
             self.info_label.setText(f"已标记 @ {m['time_s']:.1f}s: {label}")
 
     # ---- 数据流 ----
+    def _record_sync(self) -> None:
+        """录制中周期调用：把 source 的每板帧统计/逐帧/缺口 + 眼动样本写进时间线。"""
+        rec = self.recorder
+        if rec is None or not rec.is_recording:
+            return
+        src = self.source
+        # 1) 每板帧统计（board_stats 多板 / frame_stats 单板）
+        if hasattr(src, "board_stats"):
+            stats = src.board_stats()
+        elif hasattr(src, "frame_stats"):
+            stats = [src.frame_stats()]
+        else:
+            stats = None
+        if stats is not None:
+            rec.record_board_stats(stats)
+        # 2) 逐帧记录（有界 drain）
+        if hasattr(src, "drain_frame_logs"):
+            logs = src.drain_frame_logs()
+        elif hasattr(src, "drain_frame_log"):
+            logs = [src.drain_frame_log()]
+        else:
+            logs = []
+        if logs:
+            rec.record_frame_logs(logs)
+        # 3) 缺口/截断（掉线/欠采/跨板长度不等，显式标记，不静默丢）
+        if hasattr(src, "read_gap_info"):
+            rec.record_gap_info(src.read_gap_info())
+        elif hasattr(src, "last_read_gap"):
+            rec.record_gap_info({"gap_samples": int(src.last_read_gap())})
+        # 4) 眼动样本
+        if self.eye_tracker is not None:
+            for s in self.eye_tracker.read():
+                self.timeline.record_eye_sample(
+                    device_ts=s.device_ts, clock_source=s.clock_source,
+                    x=s.x, y=s.y, valid=s.valid, recv_monotonic=None)
+
     def _tick(self):
         # 累积小数样本，保证平均读取速率 = sample_rate（50ms@250Hz 应读 12.5 样本/次）
         self._frac += self.cfg.sample_rate * self.cfg.viz.refresh_ms / 1000.0
@@ -311,9 +367,10 @@ class MainWindow(QMainWindow):
         if self._raw_hist.shape[1] > raw_max:
             self._raw_hist = self._raw_hist[:, -raw_max:]
 
-        # 录制中：缓冲原始 µV 与滤波后数据
+        # 录制中：缓冲原始 µV 与滤波后数据 + 记录时间同步元数据
         if self.recorder is not None and self.recorder.is_recording:
             self.recorder.append(chunk, filtered)
+            self._record_sync()
             self.record_btn.setText(f"停止录制 {self.recorder.elapsed_seconds:.0f}s")
 
         self._tick_count += 1
@@ -404,12 +461,15 @@ class MainWindow(QMainWindow):
         super().closeEvent(event)
 
 
-def run_app(cfg, source):
-    """创建 QApplication、启动窗口并进入事件循环。"""
+def run_app(cfg, source, eye_tracker=None):
+    """创建 QApplication、启动窗口并进入事件循环。eye_tracker 可选（真实设备或模拟器）。
+
+    眼动仪在「开始录制」时才启动（见 MainWindow._start_recording），这里只透传。
+    """
     app = QApplication.instance() or QApplication(sys.argv)
     setup_theme()
     source.start()
-    win = MainWindow(cfg, source)
+    win = MainWindow(cfg, source, eye_tracker=eye_tracker)
     win.resize(1280, 800)
     win.show()
     sys.exit(app.exec())

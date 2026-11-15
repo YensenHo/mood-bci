@@ -17,6 +17,7 @@ from __future__ import annotations
 
 import json
 import os
+import time
 from datetime import datetime
 
 import numpy as np
@@ -86,9 +87,13 @@ class SessionRecorder:
         self._filtered: list = []
         self._n_samples = 0
         self._started_at: datetime | None = None
+        self._start_monotonic: float | None = None   # 录制起点的电脑单调时钟（time.monotonic）
         self._recording = False
         self.markers: list = []
         self._board_stats_log: list = []
+        # 逐帧记录（每板一个 list of (byte1 帧编号, 接收单调时间)），周期 drain 累加。
+        self._frame_logs: list = []        # list[list[tuple[int,float]]]，长度=板数
+        self._gap_log: list = []           # 每次 read 的缺口/截断信息
 
     @property
     def is_recording(self) -> bool:
@@ -96,12 +101,20 @@ class SessionRecorder:
 
     @property
     def elapsed_seconds(self) -> float:
+        """按样本数/采样率推算的时长（秒）。这是「样本时间」，不是电脑接收时间。"""
         return self._n_samples / self.fs if self.fs > 0 else 0.0
+
+    def monotonic_seconds(self) -> float:
+        """录制起点至今的电脑单调时钟秒数（time.monotonic 差值）。"""
+        if self._start_monotonic is None:
+            return 0.0
+        return time.monotonic() - self._start_monotonic
 
     # ---- 录制生命周期 ----
     def start(self) -> None:
         self.reset()
         self._started_at = datetime.now()
+        self._start_monotonic = time.monotonic()
         self._recording = True
 
     def append(self, raw_chunk, filtered_chunk) -> None:
@@ -134,12 +147,42 @@ class SessionRecorder:
 
         board_stats = MultiBoardSource.board_stats() 返回的 list（每板一个 dict）。
         录制外调用忽略。快照只追加、不覆盖原始帧统计。
+
+        ⚠️ 时间字段区分两种时钟：
+          - t_monotonic = 电脑 time.monotonic() 相对录制起点的秒数（接收时间基准）；
+          - t_samples   = 样本数/采样率（样本时间，样本连续时的近似时长）。
+        两者都会记录，不把「样本时间」冒充「电脑接收时间」。
         """
         if not self._recording:
             return
-        snap = {"t_recv": round(self.elapsed_seconds, 6),
+        snap = {"t_monotonic": round(self.monotonic_seconds(), 6),
+                "t_samples": round(self.elapsed_seconds, 6),
                 "boards": [dict(s) for s in (board_stats or [])]}
         self._board_stats_log.append(snap)
+
+    def record_frame_logs(self, frame_logs: list) -> None:
+        """周期 drain 每块板的逐帧记录（(byte1 帧编号, 接收单调时间)），累加保存。
+
+        frame_logs = [板0 的 list, 板1 的 list, ...]，每项 = (int 帧编号, float 接收单调时间)。
+        首次调用时按板数初始化；后续调用 append 到对应板。
+        """
+        if not self._recording:
+            return
+        logs = list(frame_logs or [])
+        if not self._frame_logs:
+            self._frame_logs = [[] for _ in logs]
+        for i, items in enumerate(logs):
+            if i < len(self._frame_logs):
+                self._frame_logs[i].extend(items)
+
+    def record_gap_info(self, gap_info: dict) -> None:
+        """记录一次 read 的缺口/截断信息（掉线/欠采/跨板长度不等的显式标记）。"""
+        if not self._recording:
+            return
+        self._gap_log.append({
+            "t_monotonic": round(self.monotonic_seconds(), 6),
+            "gap": dict(gap_info or {}),
+        })
 
     def stop(self):
         """停止录制并落盘。返回保存目录；无数据或未在录制时返回 None。"""
@@ -192,16 +235,25 @@ class SessionRecorder:
         with open(os.path.join(out_dir, "meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)
 
-        # 时间同步元数据（若接了 SyncTimeline）：追加式事件时间线 + 每板帧统计快照。
+        # 时间同步元数据（若接了 SyncTimeline）：追加式事件时间线 + 每板帧统计 + 逐帧 + 缺口。
         # 原始记录不可覆盖（只读追加），区分「设备采样时间」与「电脑接收时间」。
         if self.timeline is not None:
             sync = {
                 "timeline": self.timeline.events(),
                 "timeline_summary": self.timeline.summary(),
                 "board_stats_snapshots": self._board_stats_log,
-                "clock_note": ("所有 t_recv 均为电脑 time.monotonic() 相对录制起点的秒数，"
-                               "是接收时间，不是设备精确采样时间；设备采样时间见"
-                               " sample_counter / device_ts 字段。"),
+                # 逐帧记录：每板 list of [byte1 帧编号, 接收单调时间]
+                "frame_logs": [[[int(c), round(float(t), 9)] for c, t in log]
+                               for log in self._frame_logs],
+                "gap_log": self._gap_log,
+                "start_monotonic": self._start_monotonic,
+                "clock_note": (
+                    "时钟说明：\n"
+                    "  - t_monotonic / frame_logs 的时间 = 电脑 time.monotonic() 相对录制起点的秒数，"
+                    "是接收时间（一次串口 read 的多帧共享同一批接收时间，是到达时间上界），不是设备精确采样时间；\n"
+                    "  - t_samples = 样本数/采样率（样本连续时的近似时长），不是电脑接收时间；\n"
+                    "  - device_ts = 眼动仪自带时间戳（时钟源见 clock_source 字段）；\n"
+                    "  - sample_counter / byte1 帧编号 = 设备侧帧计数（0~255 回绕，语义见评估报告）。"),
             }
             with open(os.path.join(out_dir, "sync.json"), "w", encoding="utf-8") as f:
                 json.dump(sync, f, ensure_ascii=False, indent=2)

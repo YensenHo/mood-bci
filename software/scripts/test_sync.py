@@ -26,6 +26,7 @@ import numpy as np
 from eegscope.sync import SyncTimeline, StimulusScheduler
 from eegscope.sources.eye import SimulatedEyeTracker
 from eegscope.sources.openbci import OpenBCISource, parse_cyton_frame
+from eegscope.sources.multiboard import MultiBoardSource
 from eegscope.recorder import SessionRecorder
 
 _PASS = 0
@@ -61,9 +62,9 @@ def test_timeline_basics() -> None:
     _ck(s["n_events"] == 3 and s["by_kind"]["stimulus"] == 1, "summary 计数正确")
 
 
-# ---- 2. 帧编号丢帧检测 ----
+# ---- 2. 帧编号丢帧检测 + 语义分类 ----
 def test_frame_drop_detection() -> None:
-    print("[2] 帧编号丢帧检测")
+    print("[2] 帧编号丢帧检测 + 语义分类")
     src = OpenBCISource(port="COM_TEST", n_channels=8)  # 不 start，直接测统计
     # 连续帧 0..9，但 5、6 被挖掉 → 应检测到 2 帧丢
     for c in [0, 1, 2, 3, 4, 7, 8, 9]:
@@ -76,6 +77,24 @@ def test_frame_drop_detection() -> None:
     for c in [254, 255, 0, 1]:
         src2._update_frame_stats(c, 0.0)
     _ck(src2.frame_stats()["n_dropped_est"] == 0, "帧编号回绕不误判丢帧")
+    # 重复帧（diff=0）与整圈丢失无法区分 → dup_or_unknown，不误判丢帧
+    src3 = OpenBCISource(port="C3", n_channels=8)
+    for c in [0, 1, 1, 2]:
+        src3._update_frame_stats(c, 0.0)
+    _ck(src3.frame_stats()["n_dup_or_unknown"] == 1 and src3.frame_stats()["n_dropped_est"] == 0,
+        "重复帧→dup_or_unknown（不误判丢帧）")
+    # 乱序/重启（diff>=128 回退太多）→ out_of_order，不计入丢帧
+    src4 = OpenBCISource(port="C4", n_channels=8)
+    for c in [0, 1, 0]:   # 1→0 回退 255
+        src4._update_frame_stats(c, 0.0)
+    _ck(src4.frame_stats()["n_out_of_order"] == 1 and src4.frame_stats()["n_dropped_est"] == 0,
+        "乱序/重启→out_of_order（不计入丢帧）")
+    # 16ch 有线 Daisy：byte1 每帧 +1（0,1,2,3...），不误判
+    src5 = OpenBCISource(port="C5", n_channels=16)
+    for c in range(40):
+        src5._update_frame_stats(c, 0.0)
+    _ck(src5.frame_stats()["n_dropped_est"] == 0 and src5.frame_stats()["n_frames"] == 40,
+        "16ch Daisy byte1 每帧+1 不误判")
 
 
 # ---- 3. 眼动模拟器：偏移/漂移/丢帧/无效 ----
@@ -184,12 +203,30 @@ def test_sync_verification_recovery() -> None:
     _ck(0 < len(got) < nominal * 0.85, f"30%丢帧可检测（收到 {len(got)} < 名义 {nominal}）")
 
 
+# ---- 6. 跨板截断 + 掉线缺口（点3：不静默丢未消费样本） ----
+def test_multiboard_truncation() -> None:
+    print("[6] MultiBoard 跨板截断 + 掉线缺口标记")
+    mb = MultiBoardSource(ports=["A", "B"], n_channels_per_board=8,
+                          channel_names=[f"c{i}" for i in range(16)])
+    # 板A 塞 5 个样本、板B 塞 3 个（模拟两板采样长度不等）
+    for _ in range(5):
+        mb._boards[0]._queue.put(np.zeros(8))
+    for _ in range(3):
+        mb._boards[1]._queue.put(np.ones(8))
+    out = mb.read(10)
+    info = mb.read_gap_info()
+    _ck(out.shape == (16, 3), f"截断到最短长度 3（实测 {out.shape}）")
+    _ck(info["per_board_truncated"] == [2, 0],
+        f"板A截断 2 样本被显式记录（实测 {info['per_board_truncated']}），不静默丢弃")
+
+
 def main() -> int:
     test_timeline_basics()
     test_frame_drop_detection()
     test_simulated_eye()
     test_recorder_sync_json()
     test_sync_verification_recovery()
+    test_multiboard_truncation()
     print(f"\n=== {_PASS} passed, {_FAIL} failed ===")
     return 1 if _FAIL else 0
 
