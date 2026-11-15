@@ -25,14 +25,26 @@ import numpy as np
 
 @dataclass
 class EyeSample:
-    """一个眼动样本。device_ts 为设备自带时间戳（原始，不透传单位），
-    clock_source 标识其时钟来源（如 "device_1000Hz" / "host_receive"）。
-    valid=False 表示该样本不可用（眨眼/丢失/超范围）。"""
+    """一个眼动样本。原始字段全部透传，不做任何假设。
+
+    - device_ts / device_ts_unit：设备自带时间戳及其单位（"s"/"ms"/"us"/"ns"，未知=None）；
+    - clock_source：时钟来源（如 "device_1000Hz" / "host_poll"）；
+    - segment_id：时钟重置/重连分段号（每次重置/重连 +1，用于避免跨段误拟合漂移）；
+    - x/y + coordinate_system：原始坐标及其坐标系（"normalized"=归一化 / "pixels"=像素，未知=None）；
+    - valid=False 表示该样本不可用（眨眼/丢失/超范围）；
+    - confidence / frame_number / calibrated：如设备提供则透传，否则 None。
+    """
     device_ts: float | None
     clock_source: str
     x: float | None
     y: float | None
     valid: bool
+    device_ts_unit: str | None = None
+    segment_id: int = 0
+    coordinate_system: str | None = None
+    confidence: float | None = None
+    frame_number: int | None = None
+    calibrated: bool | None = None
 
 
 class EyeTrackerSource(ABC):
@@ -81,17 +93,24 @@ class SimulatedEyeTracker(EyeTrackerSource):
     def __init__(self, sample_rate: float = 120.0, *,
                  offset_s: float = 0.0, drift_ppm: float = 0.0,
                  loss_rate: float = 0.0, invalid_rate: float = 0.0,
+                 device_ts_unit: str = "s", coordinate_system: str = "normalized",
                  seed: int = 0) -> None:
         self._fs = float(sample_rate)
         self._offset_s = float(offset_s)
         self._drift = float(drift_ppm) * 1e-6     # ppm → 比例
         self._loss = float(loss_rate)
         self._invalid = float(invalid_rate)
+        self._unit = str(device_ts_unit)
+        self._coord = str(coordinate_system)
+        # 秒 → 设备时间戳单位的换算系数（设备时间戳原始透传，不擅自改单位）
+        self._ts_scale = {"s": 1.0, "ms": 1e3, "us": 1e6, "ns": 1e9}.get(self._unit, 1.0)
         self._rng = np.random.default_rng(int(seed))
 
         self._started = False
+        self._connected = True
         self._n = 0              # 已生成样本数
         self._t0 = None          # start 时的 host 单调时间
+        self._segment = 0        # 时钟重置/重连分段号
 
     @property
     def sample_rate(self) -> float:
@@ -99,19 +118,38 @@ class SimulatedEyeTracker(EyeTrackerSource):
 
     def start(self) -> None:
         self._started = True
+        self._connected = True
         self._n = 0
         self._t0 = _time.monotonic()
+        self._segment = 0
 
     def stop(self) -> None:
         self._started = False
+
+    # ---- 故障注入（用于模拟断线/重连/时钟重置）----
+    def disconnect(self) -> None:
+        """模拟断线：read() 返回空，样本不产出。"""
+        self._connected = False
+
+    def reconnect(self) -> None:
+        """模拟重连：恢复产出，且时钟分段 +1（部分设备重连会重置时间戳）。"""
+        self._connected = True
+        self._segment += 1
+        self._n = 0            # 设备时间戳归零（分段内重新从 0 计）
+
+    def reset_clock(self) -> None:
+        """模拟设备时钟重置：分段 +1，时间戳归零（不断线）。"""
+        self._segment += 1
+        self._n = 0
 
     def read(self) -> list[EyeSample]:
         """返回自上次 read 以来「设备时钟已到期」的样本。
 
         设备时钟比电脑快/慢 (1+drift)：host 走过 H 秒 → 设备走过 H*(1+drift) 秒，
-        应产出 H*(1+drift)*fs 个样本。device_ts 按设备时钟走（每样本 +1/fs）+ 固定偏移。
+        应产出 H*(1+drift)*fs 个样本。device_ts 按设备时钟走（每样本 +1/fs）+ 固定偏移，
+        单位按 device_ts_unit 透传；断线时返回空。
         """
-        if not self._started or self._t0 is None:
+        if not self._started or self._t0 is None or not self._connected:
             return []
         host_elapsed = _time.monotonic() - self._t0
         device_elapsed = host_elapsed * (1.0 + self._drift)
@@ -119,18 +157,26 @@ class SimulatedEyeTracker(EyeTrackerSource):
         out: list[EyeSample] = []
         while self._n < target:
             t_device = self._n / self._fs          # 设备采样时刻（设备时钟，秒）
-            device_ts = t_device + self._offset_s  # 设备时间戳 = 设备时钟 + 固定偏移
+            frame_no = self._n
             self._n += 1
             if self._rng.random() < self._loss:
                 continue                           # 丢帧：样本数已计，但不产出
             valid = self._rng.random() >= self._invalid
+            # 设备时间戳原始透传（秒 → 目标单位），不擅自换算
+            device_ts = (t_device + self._offset_s) * self._ts_scale
             x = 0.5 + 0.25 * np.sin(2 * np.pi * 0.2 * t_device)
             y = 0.5 + 0.25 * np.sin(2 * np.pi * 0.13 * t_device + 1.0)
             out.append(EyeSample(
                 device_ts=device_ts,
+                device_ts_unit=self._unit,
                 clock_source="simulated_device_Hz",
+                segment_id=self._segment,
                 x=None if not valid else float(x),
                 y=None if not valid else float(y),
+                coordinate_system=self._coord,
                 valid=valid,
+                confidence=None if not valid else float(1.0 - abs(np.sin(t_device))),
+                frame_number=frame_no,
+                calibrated=True,
             ))
         return out

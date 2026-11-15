@@ -203,9 +203,9 @@ def test_sync_verification_recovery() -> None:
     _ck(0 < len(got) < nominal * 0.85, f"30%丢帧可检测（收到 {len(got)} < 名义 {nominal}）")
 
 
-# ---- 6. 跨板截断 + 掉线缺口（点3：不静默丢未消费样本） ----
-def test_multiboard_truncation() -> None:
-    print("[6] MultiBoard 跨板截断 + 掉线缺口标记")
+# ---- 6. 跨板缓冲（点3：不静默丢未消费样本） ----
+def test_multiboard_buffering() -> None:
+    print("[6] MultiBoard 每板独立缓冲（不静默丢弃）")
     mb = MultiBoardSource(ports=["A", "B"], n_channels_per_board=8,
                           channel_names=[f"c{i}" for i in range(16)])
     # 板A 塞 5 个样本、板B 塞 3 个（模拟两板采样长度不等）
@@ -215,9 +215,64 @@ def test_multiboard_truncation() -> None:
         mb._boards[1]._queue.put(np.ones(8))
     out = mb.read(10)
     info = mb.read_gap_info()
-    _ck(out.shape == (16, 3), f"截断到最短长度 3（实测 {out.shape}）")
-    _ck(info["per_board_truncated"] == [2, 0],
-        f"板A截断 2 样本被显式记录（实测 {info['per_board_truncated']}），不静默丢弃")
+    _ck(out.shape == (16, 3), f"按最慢板对齐到 3 样本（实测 {out.shape}）")
+    # 板A 多出的 2 样本被缓冲（不是丢弃），下次 read 消费
+    _ck(info["per_board_buffered"] == [2, 0],
+        f"板A 多 2 样本被缓冲（实测 {info['per_board_buffered']}）")
+    _ck(mb._buffers[0].shape[1] == 2, f"板A 缓冲保留 2 样本（实测 {mb._buffers[0].shape[1]}）")
+    # 板B 再塞 3 个，下一次 read 应消费板A 缓冲的 2 个 + 板B 新 3 个
+    for _ in range(3):
+        mb._boards[1]._queue.put(np.ones(8))
+    out2 = mb.read(10)
+    _ck(out2.shape == (16, 3), f"第二次 read 消费缓冲（实测 {out2.shape}）")
+    _ck(mb._buffers[0].shape[1] == 0, "板A 缓冲已清空（未消费样本已用掉）")
+
+
+# ---- 7. 眼动接口：单位/重置/批量/断线重连 ----
+def test_eye_interface_faults() -> None:
+    print("[7] 眼动接口：单位/重置/批量/断线重连")
+    import time as _t
+    # 不同时间单位：ms
+    et = SimulatedEyeTracker(sample_rate=100.0, device_ts_unit="ms", seed=1)
+    et.start()
+    _t.sleep(0.5)
+    samples = et.read()
+    et.stop()
+    _ck(len(samples) > 0 and samples[0].device_ts_unit == "ms", "device_ts_unit=ms 透传")
+    _ck(samples[-1].device_ts is not None and samples[-1].device_ts > 400,
+        f"ms 单位数值≈500（实测 {samples[-1].device_ts:.0f}）")
+    # 时钟重置 → segment_id 递增
+    et2 = SimulatedEyeTracker(sample_rate=100.0, seed=2)
+    et2.start()
+    _t.sleep(0.1)
+    s1 = et2.read()
+    seg_before = s1[0].segment_id if s1 else 0
+    et2.reset_clock()
+    _t.sleep(0.1)
+    s2 = et2.read()
+    seg_after = s2[0].segment_id if s2 else seg_before
+    _ck(seg_after > seg_before, f"reset_clock 分段递增（{seg_before}→{seg_after}）")
+    et2.stop()
+    # 断线 / 重连
+    et3 = SimulatedEyeTracker(sample_rate=100.0, seed=3)
+    et3.start()
+    _t.sleep(0.1)
+    _ = et3.read()
+    et3.disconnect()
+    _t.sleep(0.1)
+    _ck(et3.read() == [], "断线 read 返回空")
+    et3.reconnect()
+    _t.sleep(0.1)
+    s3 = et3.read()
+    _ck(len(s3) > 0 and (s3[0].segment_id if s3 else 0) > 0, "重连后分段 +1")
+    et3.stop()
+    # 批量到达：一次 read 返回多个样本
+    et4 = SimulatedEyeTracker(sample_rate=200.0, seed=4)
+    et4.start()
+    _t.sleep(0.2)
+    batch = et4.read()
+    _ck(len(batch) > 10, f"批量到达（0.2s@200Hz→~40，实测 {len(batch)}）")
+    et4.stop()
 
 
 def main() -> int:
@@ -226,7 +281,8 @@ def main() -> int:
     test_simulated_eye()
     test_recorder_sync_json()
     test_sync_verification_recovery()
-    test_multiboard_truncation()
+    test_multiboard_buffering()
+    test_eye_interface_faults()
     print(f"\n=== {_PASS} passed, {_FAIL} failed ===")
     return 1 if _FAIL else 0
 

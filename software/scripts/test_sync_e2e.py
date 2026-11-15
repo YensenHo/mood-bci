@@ -45,6 +45,7 @@ def test_e2e_recording_entry() -> None:
     from eegscope.config import load_config
     from eegscope.sources.multiboard import MultiBoardSource
     from eegscope.sources.eye import SimulatedEyeTracker
+    from eegscope.sync import StimulusScheduler
 
     # 用临时录制目录，避免污染 software/recordings
     tmp_rec = tempfile.mkdtemp(prefix="e2e_rec_")
@@ -68,8 +69,14 @@ def test_e2e_recording_entry() -> None:
     assert win.recorder is not None
     _ck(win.recorder.timeline is win.timeline, "SyncTimeline 已传入 recorder")
 
+    # 刺激调度器：挂在录制的时间线上，计划时间相对录制起点
+    sched = StimulusScheduler(win.timeline)
+    sched.schedule("stim_onset_1", planned_s=0.05)
+    sched.schedule("stim_onset_2", planned_s=0.12)
+
     # 手动驱动 _tick 几次（绕过 QTimer，确定性）
     for _ in range(10):
+        sched.tick()      # 记录已到计划时刻的刺激事件（软件记录时间）
         win._tick()
         time.sleep(0.02)   # 让眼动模拟器按真实时间产样本
         app.processEvents()
@@ -94,6 +101,28 @@ def test_e2e_recording_entry() -> None:
     _ck("clock_note" in sync and "start_monotonic" in sync, "时钟说明 + 起点已记录")
     _ck(eye._started is False, "停止录制后眼动仪已停")
 
+    # 刺激事件：计划时间/软件记录时间/屏幕发光时间三分离
+    stim_evts = [e for e in sync["timeline"] if e["kind"] == "stimulus"]
+    _ck(len(stim_evts) >= 2, f"刺激事件已记录（实测 {len(stim_evts)}）")
+    if stim_evts:
+        s0 = stim_evts[0]["data"]
+        _ck("planned_s" in s0 and "screen_onset_s" in s0 and "screen_onset_known" in s0,
+            "刺激三时间字段分离（planned_s / t_recv / screen_onset_s）")
+        _ck(s0["screen_onset_known"] is False and s0["screen_onset_s"] is None,
+            "屏幕发光时间未知（无光电测量，不冒充已显示）")
+
+    # 重新读取会话，检查数据完整性
+    meta_path = os.path.join(out, "meta.json")
+    npz_path = os.path.join(out, "session.npz")
+    _ck(os.path.exists(meta_path) and os.path.exists(npz_path), "meta.json + session.npz 已落盘")
+    with open(meta_path, encoding="utf-8") as f:
+        meta = json.load(f)
+    npz = np.load(npz_path)
+    _ck(meta.get("n_samples", 0) > 0, f"meta n_samples>0（实测 {meta.get('n_samples')}）")
+    _ck(npz["raw"].shape[1] == meta["n_samples"],
+        f"session.npz raw 样本数 = meta（实测 {npz['raw'].shape[1]} vs {meta['n_samples']}）")
+    _ck(npz["raw"].shape[0] == 64, f"64 通道（实测 {npz['raw'].shape[0]}）")
+
 
 # ---- 2. 离线分析：测回注入的偏移/漂移 + 不可识别量标 None ----
 def test_offline_analysis() -> None:
@@ -105,18 +134,19 @@ def test_offline_analysis() -> None:
     sync = {
         "timeline": [{"kind": "eye_sample", "t_recv": i * 0.005,
                       "data": {"device_ts": i * 0.005 * (1 + DRIFT_PPM * 1e-6) + OFFSET,
+                               "device_ts_unit": "s", "segment_id": 0,
                                "clock_source": "sim", "x": 0.5, "y": 0.5, "valid": True}}
                      for i in range(500)],
         "frame_logs": [],
         "gap_log": [],
     }
     rep = analyze_sync(sync)
-    drift = rep["eye"]["clock_drift_ppm"]
-    offset = rep["eye"]["fixed_offset_s"]
+    drift = rep["eye"]["apparent_drift_ppm"]
+    offset = rep["eye"]["device_vs_host_intercept_s"]
     _ck(drift is not None and abs(drift - DRIFT_PPM) < 2000,
-        f"测回漂移 ≈ {DRIFT_PPM}ppm（实测 {drift:.0f}ppm）")
+        f"测回表观漂移 ≈ {DRIFT_PPM}ppm（实测 {drift:.0f}ppm）")
     _ck(offset is not None and abs(offset - OFFSET) < 0.02,
-        f"测回偏移 ≈ {OFFSET}s（实测 {offset:.3f}s）")
+        f"测回截距 ≈ {OFFSET}s（实测 {offset:.3f}s）")
     # 不可识别量必须显式标 None + 原因
     un = rep["unidentifiable"]
     _ck(un["absolute_end_to_end_latency_s"] is None

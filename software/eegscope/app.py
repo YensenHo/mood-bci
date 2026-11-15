@@ -346,7 +346,10 @@ class MainWindow(QMainWindow):
             for s in self.eye_tracker.read():
                 self.timeline.record_eye_sample(
                     device_ts=s.device_ts, clock_source=s.clock_source,
-                    x=s.x, y=s.y, valid=s.valid, recv_monotonic=None)
+                    x=s.x, y=s.y, valid=s.valid, recv_monotonic=None,
+                    device_ts_unit=s.device_ts_unit, segment_id=s.segment_id,
+                    coordinate_system=s.coordinate_system, confidence=s.confidence,
+                    frame_number=s.frame_number, calibrated=s.calibrated)
 
     def _tick(self):
         # 累积小数样本，保证平均读取速率 = sample_rate（50ms@250Hz 应读 12.5 样本/次）

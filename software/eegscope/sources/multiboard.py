@@ -40,6 +40,14 @@ class MultiBoardSource(DataSource):
         self._names = (names if names and len(names) == self._n_ch
                        else [f"ch{i + 1}" for i in range(self._n_ch)])
 
+        # 每板独立输出缓冲（不静默丢弃未消费样本）：
+        # 各板独立时钟 + 掉线时样本数不等，read() 把「比最慢板多出的样本」缓冲起来，
+        # 下次 read 优先消费，避免被截断丢弃。缓冲超上限时丢最旧 + 记溢出（显式标记）。
+        self._buffers = [np.zeros((self._n_ch_per_board, 0), dtype=np.float64)
+                         for _ in self._boards]
+        self._buffer_maxlen = int(round(self.sample_rate * 2.0))   # 上限 2 秒样本量
+        self._buffer_overflow = [0] * len(self._boards)            # 每板缓冲溢出计数
+
     # ---- DataSource 接口 ----
     @property
     def sample_rate(self) -> float:
@@ -80,23 +88,49 @@ class MultiBoardSource(DataSource):
         n = int(n_samples)
         if n <= 0:
             return np.zeros((self._n_ch, 0), dtype=np.float64)
-        # 逐板读，按最小样本数对齐（各板独立时钟，漂移/掉线时样本数可能不等）
-        chunks = [b.read(n) for b in self._boards]
-        lengths = [c.shape[1] for c in chunks]
-        min_len = min(lengths)
-        # 记录本次读取的截断信息：每板比 min_len 多出的样本数（这些被丢弃，不静默吞掉）。
-        self._last_truncated = [int(L - min_len) for L in lengths]
-        # 记录每板自身的读缺口（该板请求 n、实际拿到的不足部分）。
+        # 逐板：先消费上一轮缓冲，再读新样本，拼成「尽量 n 样本」的一段
+        chunks: list[np.ndarray] = []
+        for i, b in enumerate(self._boards):
+            fresh = b.read(n)
+            buf = self._buffers[i]
+            combined = (np.concatenate([buf, fresh], axis=1)
+                        if buf.shape[1] else fresh)
+            # 缓冲溢出：超上限时丢最旧样本 + 记溢出（不静默）
+            if combined.shape[1] > self._buffer_maxlen:
+                dropped = combined.shape[1] - self._buffer_maxlen
+                self._buffer_overflow[i] += dropped
+                combined = combined[:, -self._buffer_maxlen:]
+            chunks.append(combined)
         self._last_board_gaps = [int(b.last_read_gap()) for b in self._boards]
+
+        min_len = min((c.shape[1] for c in chunks), default=0)
         if min_len == 0:
-            return np.zeros((self._n_ch, 1), dtype=np.float64)  # 全部掉线兜底
-        return np.concatenate([c[:, :min_len] for c in chunks], axis=0)
+            # 全部掉线：已读到的样本全部存回缓冲（不丢），返回零填充兜底
+            for i, c in enumerate(chunks):
+                self._buffers[i] = c
+            self._last_buffered = [int(c.shape[1]) for c in chunks]
+            return np.zeros((self._n_ch, 1), dtype=np.float64)
+
+        # 每板只消费 min_len，多余部分存回缓冲（不静默丢弃未消费样本）
+        out_parts = []
+        self._last_buffered = []
+        for i, c in enumerate(chunks):
+            out_parts.append(c[:, :min_len])
+            self._buffers[i] = c[:, min_len:]
+            self._last_buffered.append(int(c.shape[1] - min_len))
+        return np.concatenate(out_parts, axis=0)
 
     def read_gap_info(self) -> dict:
-        """返回上次 read() 的缺口/截断信息（供录制层标记时间缺口，不静默丢样本）。"""
+        """返回上次 read() 的缺口/缓冲/溢出信息（供录制层标记，不静默丢样本）。
+
+        - per_board_gap      每板本次请求 n 与实际读到的不足部分（掉线/欠采）；
+        - per_board_buffered 每板比最慢板多出、暂存待下次消费的样本数（未丢弃）；
+        - per_board_overflow 每板缓冲超上限被丢最旧的累计样本数（显式标记溢出）。
+        """
         return {
             "per_board_gap": list(getattr(self, "_last_board_gaps", [0] * len(self._boards))),
-            "per_board_truncated": list(getattr(self, "_last_truncated", [0] * len(self._boards))),
+            "per_board_buffered": list(getattr(self, "_last_buffered", [0] * len(self._boards))),
+            "per_board_overflow": list(self._buffer_overflow),
         }
 
     def board_ports(self):

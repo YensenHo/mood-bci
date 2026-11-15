@@ -87,29 +87,45 @@ class SyncTimeline:
 
     def record_eye_sample(self, device_ts: Optional[float], clock_source: str,
                           x: Optional[float], y: Optional[float], valid: bool,
-                          recv_monotonic: Optional[float] = None) -> None:
-        """记一条眼动样本。device_ts=眼动仪自带时间戳；clock_source=其时钟来源。
+                          recv_monotonic: Optional[float] = None, *,
+                          device_ts_unit: Optional[str] = None,
+                          segment_id: int = 0,
+                          coordinate_system: Optional[str] = None,
+                          confidence: Optional[float] = None,
+                          frame_number: Optional[int] = None,
+                          calibrated: Optional[bool] = None) -> None:
+        """记一条眼动样本。device_ts=眼动仪自带时间戳（原始值）。
 
-        valid=False 表示该段眼动无效（眨眼/丢失/超范围）。x/y 为归一化或像素坐标，
-        单位在 meta 里另行声明，这里只存原始值。
+        device_ts_unit / clock_source / segment_id / coordinate_system 全部原始透传，
+        不擅自换算单位或改坐标；valid=False 表示无效段（眨眼/丢失/超范围）。
+        confidence / frame_number / calibrated 如设备提供则透传，否则 None。
         """
         self._events.append(TimelineEvent(
             kind="eye_sample",
             t_recv=self._rel(recv_monotonic),
             data={"device_ts": None if device_ts is None else round(float(device_ts), 9),
+                  "device_ts_unit": None if device_ts_unit is None else str(device_ts_unit),
                   "clock_source": str(clock_source),
+                  "segment_id": int(segment_id),
                   "x": None if x is None else float(x),
                   "y": None if y is None else float(y),
-                  "valid": bool(valid)},
+                  "coordinate_system": None if coordinate_system is None else str(coordinate_system),
+                  "valid": bool(valid),
+                  "confidence": None if confidence is None else float(confidence),
+                  "frame_number": None if frame_number is None else int(frame_number),
+                  "calibrated": None if calibrated is None else bool(calibrated)},
         ))
 
     def record_stimulus(self, event_id: str, planned_s: Optional[float],
-                        kind: str = "onset", *, screen_onset_known: bool = False) -> None:
-        """记一条刺激事件。
+                        kind: str = "onset", *, screen_onset_known: bool = False,
+                        screen_onset_s: Optional[float] = None) -> None:
+        """记一条刺激事件，三个时间严格分离：
 
-        planned_s = 计划出现时间（相对 timeline 起点，若由调度器给出）；
-        t_recv（本函数记下的）= 软件实际记录时间；
-        screen_onset_known=False 表示屏幕实际发光时间未知（无外部光电测量）。
+        - planned_s        = 计划出现时间（相对 timeline 起点，若由调度器给出）；
+        - t_recv（本函数）= 软件实际记录时间（单调时钟）；
+        - screen_onset_s   = 屏幕实际发光时间（相对 timeline 起点），
+                             **只有外部光电测量才有**，无测量时必须为 None（标 unknown）。
+        screen_onset_known=False 表示屏幕发光时间未知，不得把定时器事件冒充屏幕已显示。
         """
         self._events.append(TimelineEvent(
             kind="stimulus",
@@ -117,7 +133,8 @@ class SyncTimeline:
             data={"event_id": str(event_id),
                   "planned_s": None if planned_s is None else round(float(planned_s), 9),
                   "stim_kind": str(kind),
-                  "screen_onset_known": bool(screen_onset_known)},
+                  "screen_onset_known": bool(screen_onset_known),
+                  "screen_onset_s": None if screen_onset_s is None else round(float(screen_onset_s), 9)},
         ))
 
     def record_event(self, kind: str, **data: Any) -> None:
