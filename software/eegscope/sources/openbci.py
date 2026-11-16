@@ -277,7 +277,7 @@ class OpenBCISource(DataSource):
     # ---- 后台读串口线程 ----
     def _reader_loop(self) -> None:
         scanner = FrameScanner()
-        pending_main = None  # Daisy：暂存主板 8ch，等副板 8ch 拼成 16ch
+        pending_main = None  # Daisy：暂存 (帧编号, 前 8 通道)
         while not self._stop_event.is_set():
             try:
                 ser = self._ser
@@ -297,9 +297,12 @@ class OpenBCISource(DataSource):
                 else:
                     board = frame[1] & 1
                     if board == 0:
-                        pending_main = ch
-                    elif pending_main is not None:
-                        self._queue.put(np.concatenate([pending_main, ch]))
+                        pending_main = (frame[1], ch)
+                    elif pending_main is not None and frame[1] == (pending_main[0] + 1) % 256:
+                        self._queue.put(np.concatenate([pending_main[1], ch]))
+                        pending_main = None
+                    else:
+                        # 不把丢帧、重复帧或重启前后的两个半帧拼成一个样本。
                         pending_main = None
 
     def _update_frame_stats(self, counter: int, recv_monotonic: float) -> dict:

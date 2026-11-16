@@ -95,6 +95,7 @@ class SessionRecorder:
         self._stop_monotonic: float | None = None
         self._recording = False
         self.markers: list = []
+        self.alignment = None
         self._board_stats_log: list = []
         # 逐帧记录（每板一个 list of (byte1 帧编号, 接收单调时间)），周期 drain 累加。
         self._frame_logs: list = []        # list[list[tuple[int,float]]]，长度=板数
@@ -143,7 +144,8 @@ class SessionRecorder:
         """在 meta 追加一个 marker（时间 = 当前录制相对秒）。录制外调用返回 None。"""
         if not self._recording:
             return None
-        m = {"time_s": round(self.elapsed_seconds, 6), "label": str(label)}
+        m = {"time_s": round(self.elapsed_seconds, 6),
+             "t_monotonic": round(self.monotonic_seconds(), 6), "label": str(label)}
         self.markers.append(m)
         return m
 
@@ -239,6 +241,7 @@ class SessionRecorder:
             "recorded_at": (self._started_at or datetime.now()).isoformat(),
             "config": self.config_snapshot,
             "markers": self.markers,
+            "alignment": self.alignment,
         }
         with open(os.path.join(out_dir, "meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)

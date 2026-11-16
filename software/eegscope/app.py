@@ -184,11 +184,21 @@ class MainWindow(QMainWindow):
         self.info_label = QLabel("")
         self.info_label.setStyleSheet("color: #999;")
         bar.addWidget(self.info_label)
+        if hasattr(self.source, "discard_pre_boundary_samples"):
+            sync_notice = QLabel("多板未硬件同步")
+            sync_notice.setStyleSheet("color: #e69f00;")
+            bar.addWidget(sync_notice)
         bar.addStretch(1)
         return bar
 
     # ---- 控制回调 ----
     def _on_start_toggled(self, checked):
+        if checked and self.recorder is not None:
+            self.start_btn.blockSignals(True)
+            self.start_btn.setChecked(False)
+            self.start_btn.blockSignals(False)
+            self.info_label.setText("录制期间不能暂停采集，请先停止录制")
+            return
         if checked:
             self.timer.stop()
             self.start_btn.setText("继续")
@@ -227,11 +237,11 @@ class MainWindow(QMainWindow):
             self._stop_recording()
 
     def _start_recording(self):
-        # 不将上一会话/录制前的帧日志混入新会话。
-        if hasattr(self.source, "drain_frame_logs"):
-            self.source.drain_frame_logs()
-        elif hasattr(self.source, "drain_frame_log"):
-            self.source.drain_frame_log()
+        if not self.timer.isActive():
+            self.start_btn.setChecked(False)
+            self._last_tick = time.monotonic()
+            self.timer.start(self.cfg.viz.refresh_ms)
+            self.start_btn.setText("暂停")
         # 新建一条时间线（每次录制独立起点），并（可选）启动眼动仪
         self.timeline = SyncTimeline()
         self.timeline.start()
@@ -248,7 +258,16 @@ class MainWindow(QMainWindow):
             recordings_dir=_RECORDINGS_DIR,
             timeline=self.timeline,
         )
+        # 在眼动设备等可能耗时的启动步骤之后，再清理录制前积压。
+        alignment = None
+        if hasattr(self.source, "discard_pre_boundary_samples"):
+            alignment = self.source.discard_pre_boundary_samples()
+        if hasattr(self.source, "drain_frame_logs"):
+            self.source.drain_frame_logs()
+        elif hasattr(self.source, "drain_frame_log"):
+            self.source.drain_frame_log()
         self.recorder.start()
+        self.recorder.alignment = alignment
         self.record_btn.setText("停止录制")
         self.info_label.setText("录制中…")
 

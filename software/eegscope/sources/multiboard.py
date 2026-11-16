@@ -15,6 +15,7 @@
 from __future__ import annotations
 
 import numpy as np
+import time
 
 from .base import DataSource
 from .openbci import OpenBCISource
@@ -79,6 +80,28 @@ class MultiBoardSource(DataSource):
     def start(self) -> None:
         for b in self._boards:
             b.start()
+        # 板卡依次握手期间，较早启动的板会产生旧样本。
+        self.discard_pre_boundary_samples()
+
+    def discard_pre_boundary_samples(self) -> dict:
+        """丢弃边界之前已收到的积压，仅在采集启动/新录制开始前调用。
+
+        这是接收端粗对齐，不是采样时钟同步；串口/设备内部可能仍有旧数据。
+        每板快照后到达的数据保留，避免无限清队列。
+        """
+        started = time.monotonic()
+        buffered = [int(buf.shape[1]) for buf in self._buffers]
+        self._buffers = [np.zeros((self._n_ch_per_board, 0), dtype=np.float64)
+                         for _ in self._boards]
+        queued = [b._queue.qsize() for b in self._boards]
+        removed = [b.read_available(n).shape[1] for b, n in zip(self._boards, queued)]
+        self._last_buffered = [0] * len(self._boards)
+        return {"method": "discard_received_pre_boundary",
+                "discarded_buffered_samples": buffered,
+                "discarded_queued_samples": removed,
+                "boundary_duration_seconds": time.monotonic() - started,
+                "hardware_synchronized": False,
+                "note": "接收端近似边界；设备/串口残留、传输延迟和独立时钟仍可能造成偏移或漂移。"}
 
     def stop(self) -> None:
         for b in self._boards:

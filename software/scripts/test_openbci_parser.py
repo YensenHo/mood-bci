@@ -93,6 +93,21 @@ def main() -> int:
         pass
     print("[8] OpenBCISource 构造 OK: 8ch→250Hz, 16ch→125Hz, 12ch 报错")
 
+    # 丢失半帧后，不可将不相邻的前后半帧拼成一个样本。
+    stream = b''.join(make_frame([c] * 8, counter=c) for c in (0, 3, 4, 5))
+    class FakeSerial:
+        in_waiting = len(stream)
+        def read(self, _n):
+            s16._stop_event.set()
+            return stream
+    s16._ser = FakeSerial()
+    s16._reader_loop()
+    paired = s16.read_available(10)
+    assert paired.shape == (16, 1), paired.shape
+    assert np.allclose(paired[:8, 0], 4 * scale24)
+    assert np.allclose(paired[8:, 0], 5 * scale24)
+    print("[9] 丢失半帧后不跨帧错误拼接")
+
     print("\n✅ OpenBCI 解析器测试全部通过")
     return 0
 
