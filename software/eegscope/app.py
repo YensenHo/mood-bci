@@ -20,7 +20,7 @@ from .recorder import SessionRecorder, config_snapshot
 from .remote import StreamUploader
 from .sync import SyncTimeline
 from .viz import (EmotionPanel, QualityPanel, SpectrogramPanel, SpectrumPanel,
-                  TopographyPanel, WaveformPanel, setup_theme)
+                  TopographyPanel, WaveformPanel, compute_channel_quality, setup_theme)
 
 # 录制输出根目录：dev = software/recordings/；frozen = exe 目录/recordings/
 _RECORDINGS_DIR = _runtime.data_dir("recordings")
@@ -50,6 +50,7 @@ class MainWindow(QMainWindow):
         self._tick_count = 0
         # 指标显示平滑（EMA），降低低 alpha 时 FAA/效价/唤醒度的噪声抖动
         self._ema_state = {}
+        self._last_valid_channels = None
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
@@ -434,8 +435,25 @@ class MainWindow(QMainWindow):
         if hist.shape[1] < n_win:
             return  # 等窗口攒满一个 analysis 窗再算，避免短窗导致的噪声指标
         data = hist[:, -n_win:]
-
-        metrics = self.analyzer.analyze(data)
+        if self._raw_hist.shape[1] < n_win:
+            return
+        raw_win = self._raw_hist[:, -n_win:]
+        quality = compute_channel_quality(raw_win, self.cfg.sample_rate,
+                                          full_scale_uv=self.source.full_scale_uv)
+        valid = [r["status"] != "bad" and nm.strip().upper() not in ("NC", "", "REF", "GND")
+                 for r, nm in zip(quality, self.source.channel_names)]
+        self.quality.update_quality(raw_win, quality)
+        mask = tuple(valid)
+        if self._last_valid_channels is not None and mask != self._last_valid_channels:
+            self._ema_state.clear()
+            # 校准时的通道集合变化会改变平均功率，旧基线不可继续使用。
+            self.calibrator.reset()
+        self._last_valid_channels = mask
+        metrics = self.analyzer.analyze(data, valid_channels=valid)
+        if self.recorder is not None and self.recorder.is_recording:
+            reasons = [(["预留或参考通道"] if nm.strip().upper() in ("NC", "", "REF", "GND")
+                        else r["reasons"]) for nm, r in zip(self.source.channel_names, quality)]
+            self.recorder.record_channel_quality(valid, reasons)
 
         # 基线校准（P1 被试内 baseline）：采集中累加样本；已校准则 z-score
         if self._baseline_mode:
@@ -443,6 +461,11 @@ class MainWindow(QMainWindow):
         if self.calibrator.calibrated:
             metrics = self.calibrator.zscore(metrics)
             metrics["_calibrated"] = True
+        # 软件构造的效价/唤醒度仅在各自具备被试内基线时显示。
+        if not self.calibrator.has_calibration("valence"):
+            metrics["valence"] = None
+        if not self.calibrator.has_calibration("arousal"):
+            metrics["arousal"] = None
 
         # 显示层 EMA 平滑（不改变分析器输出的原始指标）
         disp = dict(metrics)
@@ -452,24 +475,28 @@ class MainWindow(QMainWindow):
         self.emotion.update_metrics(disp)
 
         ch_idx = max(0, min(self.ch_selector.currentIndex(), data.shape[0] - 1))
-        freqs, psd = welch_psd(data[ch_idx], self.cfg.sample_rate)
-        self.spectrum.update_psd(freqs, psd)
+        if valid[ch_idx]:
+            freqs, psd = welch_psd(data[ch_idx], self.cfg.sample_rate)
+            self.spectrum.update_psd(freqs, psd)
+        else:
+            self.spectrum.update_psd(np.array([]), np.array([]))
 
         # 脑地形图：对每个频带算「每通道频带功率」，推给面板（面板按当前选中频带渲染）
         band_powers = {}
         for bname, (blo, bhi) in self.cfg.analysis.bands.items():
-            band_powers[bname] = band_power_map(data, self.cfg.sample_rate, blo, bhi)
+            power = band_power_map(data, self.cfg.sample_rate, blo, bhi)
+            power[~np.asarray(valid)] = np.nan
+            band_powers[bname] = power
         self.topography.update_band_powers(band_powers)
 
         # 时频图：取面板下拉选中的通道，喂最近 window_seconds 秒（约 10s）滤波数据
         sp_idx = self.spectrogram.selected_channel_index()
         sp_win = int(self.spectrogram.window_sec * self.cfg.sample_rate)
         sp_data = hist[sp_idx, -min(hist.shape[1], sp_win):]
-        self.spectrogram.update_spectrogram(sp_data)
-
-        # 电极接触检测：用原始数据窗（滤波会把打满通道的直流去掉，误判成平线）
-        raw_win = self._raw_hist[:, -min(self._raw_hist.shape[1], n_win):]
-        self.quality.update_quality(raw_win)
+        if valid[sp_idx]:
+            self.spectrogram.update_spectrogram(sp_data)
+        else:
+            self.spectrogram.img.clear()
 
         if metrics.get("faa_ok"):
             if self.calibrator.calibrated:
@@ -486,6 +513,7 @@ class MainWindow(QMainWindow):
 
     def _ema(self, key, value, alpha=0.3):
         if value is None:
+            self._ema_state.pop(key, None)
             return None
         prev = self._ema_state.get(key)
         if prev is None:

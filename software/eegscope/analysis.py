@@ -110,24 +110,41 @@ class EmotionAnalyzer:
         return _trapz(psd[:, m], freqs[m], axis=1)
 
     # ---- 主入口 ----
-    def analyze(self, sig):
+    def analyze(self, sig, valid_channels=None):
         """sig: (n_ch, n) 已滤波 EEG 数据（µV），返回指标 dict。"""
         result = self._empty_result()
         sig = np.asarray(sig, dtype=np.float64)
         if sig.ndim == 1:
             sig = sig[None, :]
         n_ch, n = sig.shape
+        if n_ch != len(self.channel_names):
+            raise ValueError("通道数与名称数量不一致")
         if n < self.fs * 0.5:  # 至少 0.5 秒数据才能稳定估计 PSD
             result["note"] = "数据不足"
             return result
 
-        freqs, psd = welch_psd(sig, self.fs)
+        valid = np.array([nm.strip().upper() not in ("NC", "", "REF", "GND")
+                          for nm in self.channel_names], dtype=bool)
+        if valid_channels is not None:
+            supplied = np.asarray(valid_channels, dtype=bool)
+            if supplied.shape != (n_ch,):
+                raise ValueError("通道质量掩码长度不匹配")
+            valid &= supplied
+        valid &= np.isfinite(sig).all(axis=1)
+        result["valid_channels"] = valid.tolist()
+        if not valid.any():
+            result["note"] = "无可用通道，无法计算"
+            return result
+        # 无效通道不进入任何平均值，且 NaN/Inf 不进入频谱计算。
+        safe_sig = sig.copy()
+        safe_sig[~valid] = 0
+        freqs, psd = welch_psd(safe_sig, self.fs)
 
         # 分频带功率（每通道积分后跨通道平均）
         band_per_ch = {}
         for name, (lo, hi) in self.bands.items():
             per_ch = self._integrate(psd, freqs, lo, hi)
-            result["bands"][name] = float(np.mean(per_ch))
+            result["bands"][name] = float(np.mean(per_ch[valid]))
             band_per_ch[name] = per_ch
         alpha_per_ch = band_per_ch.get("alpha")
         theta_per_ch = band_per_ch.get("theta")
@@ -135,7 +152,7 @@ class EmotionAnalyzer:
         # FAA（需要 F3、F4 同时存在）
         i_f3 = self._index(self.faa_channels[0])
         i_f4 = self._index(self.faa_channels[1])
-        if i_f3 is not None and i_f4 is not None and alpha_per_ch is not None:
+        if i_f3 is not None and i_f4 is not None and valid[i_f3] and valid[i_f4] and alpha_per_ch is not None:
             p_f3 = alpha_per_ch[i_f3]
             p_f4 = alpha_per_ch[i_f4]
             if p_f3 > 0 and p_f4 > 0:
@@ -144,10 +161,10 @@ class EmotionAnalyzer:
             else:
                 result["note"] = "alpha 功率为 0，无法计算 FAA"
         else:
-            result["note"] = "需 F3/F4"
+            result["note"] = "需 F3/F4" if i_f3 is None or i_f4 is None else "F3/F4 信号异常，暂停计算"
 
         # 额叶 theta 不对称（效价备选：部分研究用 theta 比 alpha 更敏感，尤其焦虑/回避）
-        if i_f3 is not None and i_f4 is not None and theta_per_ch is not None:
+        if i_f3 is not None and i_f4 is not None and valid[i_f3] and valid[i_f4] and theta_per_ch is not None:
             t_f3 = theta_per_ch[i_f3]
             t_f4 = theta_per_ch[i_f4]
             if t_f3 > 0 and t_f4 > 0:
@@ -156,10 +173,11 @@ class EmotionAnalyzer:
         # 唤醒度/投入度辅助指标
         beta = result["bands"].get("beta") or 0.0
         alpha = result["bands"].get("alpha") or 0.0
-        result["beta_alpha_ratio"] = float(beta / (alpha + 1e-12))
+        if alpha > 0:
+            result["beta_alpha_ratio"] = float(beta / alpha)
 
         # 投入度 = 中央区 beta/alpha（HARNESS 指标表：中央区，不是全通道平均）
-        central = self._central_indices()
+        central = [i for i in self._central_indices() if valid[i]]
         if central and "beta" in band_per_ch and "alpha" in band_per_ch:
             b_c = float(np.mean(band_per_ch["beta"][central]))
             a_c = float(np.mean(band_per_ch["alpha"][central]))
@@ -167,7 +185,7 @@ class EmotionAnalyzer:
                 result["engagement"] = float(b_c / a_c)
 
         # 枕顶区低频功率（delta+theta，唤醒度相关，HARNESS 效价/唤醒度指标之一）
-        po = self._parieto_occipital_indices()
+        po = [i for i in self._parieto_occipital_indices() if valid[i]]
         if po:
             lf = 0.0
             for bname in ("delta", "theta"):
@@ -176,14 +194,15 @@ class EmotionAnalyzer:
             result["parieto_occipital_lf"] = float(lf)
 
         # 枕区 alpha（通道名以 O 开头）
-        occ_idx = [i for i, nm in enumerate(self.channel_names) if nm.upper().startswith("O")]
+        occ_idx = [i for i, nm in enumerate(self.channel_names) if valid[i] and nm.upper().startswith("O")]
         if occ_idx and alpha_per_ch is not None:
             result["alpha_occipital"] = float(np.mean(alpha_per_ch[occ_idx]))
 
         # 映射到 [-1, 1] 的效价/唤醒度（供二维指示显示）
         if result["faa"] is not None:
             result["valence"] = float(np.tanh(result["faa"]))
-        result["arousal"] = float(np.tanh(result["beta_alpha_ratio"] - 1.0))
+        if result["beta_alpha_ratio"] is not None:
+            result["arousal"] = float(np.tanh(result["beta_alpha_ratio"] - 1.0))
 
         return result
 
@@ -211,6 +230,9 @@ class BaselineCalibrator:
     @property
     def n_samples(self):
         return len(self._samples.get("faa", []))
+
+    def has_calibration(self, key):
+        return key in self._stats
 
     def add_sample(self, metrics):
         """累积一帧指标（基线采集阶段每帧调用）。"""

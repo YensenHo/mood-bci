@@ -11,6 +11,7 @@ from PySide6.QtWidgets import (QComboBox, QGraphicsPolygonItem, QGridLayout,
                                QHBoxLayout, QLabel, QVBoxLayout, QWidget)
 from scipy.interpolate import griddata
 from scipy.signal import spectrogram
+from scipy.spatial import QhullError
 
 from .analysis import band_power_map, welch_psd
 
@@ -293,10 +294,13 @@ class EmotionPanel(QWidget):
         if v is not None and a is not None:
             self.va_trail_data.append((float(v), float(a)))
             self.va_point.setData([float(v)], [float(a)])
-            if self.va_trail_data:
-                xs = [p[0] for p in self.va_trail_data]
-                ys = [p[1] for p in self.va_trail_data]
-                self.va_trail.setData(xs, ys)
+            xs = [p[0] for p in self.va_trail_data]
+            ys = [p[1] for p in self.va_trail_data]
+            self.va_trail.setData(xs, ys)
+        else:
+            self.va_trail_data.clear()
+            self.va_point.setData([], [])
+            self.va_trail.setData([], [])
 
 
 # =====================================================================
@@ -328,7 +332,7 @@ def topo_interpolate(channel_names, values, grid_n=64, radius=1.0, head_xy=None)
     pts, vals = [], []
     for i, nm in enumerate(channel_names):
         key = str(nm).upper()
-        if key in head_xy and i < len(values):
+        if key in head_xy and i < len(values) and np.isfinite(values[i]):
             pts.append(head_xy[key])
             vals.append(float(values[i]))
     r = 1.15 * radius
@@ -336,8 +340,11 @@ def topo_interpolate(channel_names, values, grid_n=64, radius=1.0, head_xy=None)
     y = np.linspace(r, -r, grid_n)  # 下行：让 grid 第 0 行 = 头顶
     gx, gy = np.meshgrid(x, y)
     if len(pts) >= 3:
-        zi = griddata(np.array(pts), np.array(vals, dtype=np.float64),
-                      (gx, gy), method="linear")
+        try:
+            zi = griddata(np.array(pts), np.array(vals, dtype=np.float64),
+                          (gx, gy), method="linear")
+        except QhullError:
+            zi = np.full_like(gx, np.nan)
     else:
         zi = np.full_like(gx, np.nan)
     inside = (gx ** 2 + gy ** 2) <= (radius ** 2)
@@ -470,10 +477,11 @@ class TopographyPanel(QWidget):
         matched_idx, vals = [], []
         for i, nm in enumerate(self.channel_names):
             key = nm.upper()
-            if key in self._xy and i < powers.size:
+            if key in self._xy and i < powers.size and np.isfinite(powers[i]):
                 matched_idx.append(i)
                 vals.append(float(powers[i]))
         if len(matched_idx) < 3:
+            self.img.clear()
             return  # 不足 3 个可定位通道，无法 linear 插值，保持空图
 
         # 归一化：log10(功率) → min-max → [0,1]（对数压缩动态范围，突出空间对比）
@@ -532,22 +540,22 @@ def compute_channel_quality(data, fs, *, full_scale_uv=None,
         rms = float(np.sqrt(np.mean(x * x))) if x.size else 0.0
         std = float(np.std(x)) if x.size else 0.0
         # 平线 = 既无波动又无幅度（真没接上）；打满的通道 std≈0 但 rms 巨大，不算平线
-        flat = (std <= flat_std) and (rms < rms_lo_warn)
+        flat = std <= flat_std
         sat = float(np.mean(np.abs(x) >= sat_uv)) if x.size else 0.0
         saturated = sat > sat_ratio
         mains = float(mains_psd[i]) if mains_psd is not None else 0.0
 
         sev = 0
         reasons = []
-        if flat:
+        if not np.isfinite(x).all():
             sev = 2
-            reasons.append("没接上（无信号）")
+            reasons.append("数据无效")
         elif saturated or rms > railed_rms:
             sev = 2
-            if saturated:
-                reasons.append(f"接触不良（信号打满 {sat * 100:.0f}%）")
-            else:
-                reasons.append(f"接触不良（信号过大 rms={rms:.0f}µV）")
+            reasons.append(f"信号接近量程极限 {sat * 100:.0f}%")
+        elif flat:
+            sev = 2
+            reasons.append("信号平线，原因待检查")
         # 其余 = 良好（贴着有信号；rms 高只是 50Hz/运动噪声，不算接触问题）
 
         status = {0: "good", 1: "warn", 2: "bad"}[sev]
@@ -574,7 +582,7 @@ class QualityPanel(QWidget):
         "bad": "#c62828",
         "na": "#3a3a40",
     }
-    _STATUS_TEXT = {"good": "良好", "warn": "异常", "bad": "接触不良"}
+    _STATUS_TEXT = {"good": "未检出明显异常", "warn": "待检查", "bad": "异常，已排除"}
 
     def __init__(self, channel_names, fs, full_scale_uv=None):
         super().__init__()
@@ -588,14 +596,14 @@ class QualityPanel(QWidget):
 
         # 标题 + 图例
         head = QHBoxLayout()
-        title = QLabel("电极接触检测")
+        title = QLabel("通道信号初筛（非阻抗检测）")
         title.setStyleSheet("font-weight: bold; font-size: 14px; color: #e0e0e0;")
         head.addWidget(title)
         head.addStretch(1)
         legend = QLabel(
-            '<span style="color:#4caf50">●</span> 良好&nbsp;&nbsp;'
-            '<span style="color:#f9a825">●</span> 异常&nbsp;&nbsp;'
-            '<span style="color:#c62828">●</span> 接触不良')
+            '<span style="color:#4caf50">●</span> 未检出明显异常&nbsp;&nbsp;'
+            '<span style="color:#f9a825">●</span> 待检查&nbsp;&nbsp;'
+            '<span style="color:#c62828">●</span> 异常已排除')
         legend.setStyleSheet("color: #aaa; font-size: 12px;")
         head.addWidget(legend)
         layout.addLayout(head)
@@ -631,12 +639,17 @@ class QualityPanel(QWidget):
         layout.addLayout(grid)
         layout.addStretch(1)
 
-    def update_quality(self, data) -> None:
+    def update_quality(self, data, results=None) -> None:
         """用当前窗数据刷新总结 + 每通道状态（命名避开 QWidget.update()）。"""
-        results = compute_channel_quality(data, self.fs, full_scale_uv=self.full_scale_uv)
+        if results is None:
+            results = compute_channel_quality(data, self.fs, full_scale_uv=self.full_scale_uv)
         good = warn = bad = 0
         bad_names, warn_names = [], []
         for lbl, r, nm in zip(self._labels, results, self.names):
+            if nm.strip().upper() in ("NC", "", "REF", "GND"):
+                lbl.setStyleSheet("background-color:#555; color:#ddd; font-size:10px;")
+                lbl.setToolTip(f"{nm} · 未纳入计算")
+                continue
             color = self._STATUS_COLORS.get(r["status"], self._STATUS_COLORS["na"])
             lbl.setStyleSheet(
                 f"background-color:{color}; color:#ffffff; font-size: 10px;"
@@ -663,16 +676,16 @@ class QualityPanel(QWidget):
             return
         need = bad_names + warn_names
         if not need:
-            self.summary.setText(f"✅ {total} 个电极全部接触良好")
+            self.summary.setText(f"{total} 个通道未发现明显异常（不等于接触已验证）")
             self.summary.setStyleSheet(
                 "font-size: 14px; font-weight: bold; color: #4caf50; padding: 2px;")
             self.advice.setText("")
         else:
             self.summary.setText(
-                f"⚠️ {good}/{total} 良好 · {warn} 异常 · {bad} 接触不良")
+                f"⚠️ {good}/{total} 未检出明显异常 · {warn} 待检查 · {bad} 异常已排除")
             self.summary.setStyleSheet(
                 "font-size: 14px; font-weight: bold; color: #f9a825; padding: 2px;")
-            self.advice.setText("请调整电极：" + "、".join(need))
+            self.advice.setText("请检查通道：" + "、".join(need))
 
 
 # =====================================================================

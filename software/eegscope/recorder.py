@@ -100,6 +100,7 @@ class SessionRecorder:
         # 逐帧记录（每板一个 list of (byte1 帧编号, 接收单调时间)），周期 drain 累加。
         self._frame_logs: list = []        # list[list[tuple[int,float]]]，长度=板数
         self._gap_log: list = []           # 每次 read 的缺口/截断信息
+        self._quality_log: list = []
 
     @property
     def is_recording(self) -> bool:
@@ -191,6 +192,13 @@ class SessionRecorder:
             "gap": dict(gap_info or {}),
         })
 
+    def record_channel_quality(self, valid, reasons) -> None:
+        if self._recording:
+            self._quality_log.append({"t_monotonic": round(self.monotonic_seconds(), 6),
+                                      "t_samples": round(self.elapsed_seconds, 6),
+                                      "valid": [bool(x) for x in valid],
+                                      "reasons": reasons})
+
     def stop(self):
         """停止录制并落盘。返回保存目录；无数据或未在录制时返回 None。"""
         if not self._recording:
@@ -257,6 +265,8 @@ class SessionRecorder:
                 "frame_logs": [[[int(c), round(float(t), 9)] for c, t in log]
                                for log in self._frame_logs],
                 "gap_log": self._gap_log,
+                "channel_quality": self._quality_log,
+                "channel_quality_note": "分析窗口内按原始数据判断明显平线、量程饱和和非有限值；NC/REF/GND 不参与。未标坏不代表接触或信号质量已验证。",
                 "start_monotonic": self._start_monotonic,
                 "clock_note": (
                     "时钟说明：\n"
