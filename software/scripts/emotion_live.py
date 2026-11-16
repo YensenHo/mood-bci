@@ -72,7 +72,7 @@ def main():
 
     def _clean(x):
         y = bp(x - x.mean(), fs)
-        y = notch(y, fs, 25.0)   # 25Hz 硬件振荡陷波
+        y = notch(y, fs, 25.0)   # 25 Hz 来源未确定；滤波会削弱附近频率
         return notch(y, fs, 50.0)  # 50Hz 工频陷波
 
     filt = np.array([_clean(x) for x in data])

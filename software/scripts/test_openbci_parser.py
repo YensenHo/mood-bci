@@ -92,9 +92,16 @@ def main() -> int:
     except ValueError:
         pass
     print("[8] OpenBCISource 构造 OK: 8ch→250Hz, 16ch→125Hz, 12ch 报错")
+    assert OpenBCISource('test', scale_uv=0.5).full_scale_uv == 0.5 * 2**23
+    for invalid in (-1, 7):
+        try:
+            OpenBCISource('test', gain_code=invalid)
+            raise AssertionError('invalid gain code accepted')
+        except ValueError:
+            pass
 
     # 丢失半帧后，不可将不相邻的前后半帧拼成一个样本。
-    stream = b''.join(make_frame([c] * 8, counter=c) for c in (0, 3, 4, 5))
+    stream = b''.join(make_frame([c] * 8, counter=c) for c in (1, 4, 5, 6, 255, 0))
     class FakeSerial:
         in_waiting = len(stream)
         def read(self, _n):
@@ -103,10 +110,12 @@ def main() -> int:
     s16._ser = FakeSerial()
     s16._reader_loop()
     paired = s16.read_available(10)
-    assert paired.shape == (16, 1), paired.shape
-    assert np.allclose(paired[:8, 0], 4 * scale24)
-    assert np.allclose(paired[8:, 0], 5 * scale24)
-    print("[9] 丢失半帧后不跨帧错误拼接")
+    assert paired.shape == (16, 2), paired.shape
+    assert np.allclose(paired[:8, 0], 5 * scale24)
+    assert np.allclose(paired[8:, 0], 6 * scale24)
+    assert np.allclose(paired[:8, 1], 255 * scale24)
+    assert np.allclose(paired[8:, 1], 0)
+    print("[9] 奇数帧为前 8 通道；丢帧和计数回绕处理正确")
 
     print("\n✅ OpenBCI 解析器测试全部通过")
     return 0

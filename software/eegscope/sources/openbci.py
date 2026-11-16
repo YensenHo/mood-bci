@@ -16,7 +16,8 @@
 
 16 通道（Cyton + Daisy）：
   两个 8ch 板级联，样本计数最低位 bit0 区分主/副板：
-    bit0=0 → 主板（通道 1-8）；bit0=1 → 副板（通道 9-16）。
+    奇数帧 → 主板（通道 1-8）；偶数帧 → 副板（通道 9-16）。
+  此顺序遵循 RT-BCI 产品资料和 OpenBCI Cyton 官方协议；需实板确认。
   每通道有效采样率 = 基频一半（250 → 125 Hz）。
 
 ⚠️ 诚实边界：这是「OpenBCI 兼容」克隆板，具体波特率/帧格式/通道数/缩放可能与
@@ -113,11 +114,17 @@ class OpenBCISource(DataSource):
         self._n_ch = int(n_channels)
         self._daisy = (self._n_ch == 16)
         self._gain = float(gain)
+        if not np.isfinite(self._gain) or self._gain <= 0:
+            raise ValueError("gain 必须是大于零的有限数值")
+        if scale_uv is not None and (not np.isfinite(float(scale_uv)) or float(scale_uv) <= 0):
+            raise ValueError("scale_uv 必须是大于零的有限数值")
         self._scale = float(scale_uv) if scale_uv else None
         self._timeout = float(timeout)
         # gain_code：RT-BCI 板的「x 通道 ... X」增益指令参数（0=1x,1=2x,2=4x,3=6x,4=8x,5=12x,6=24x）。
         # None = 不发送增益指令（保持板子上电默认，通常 24x）。
         self._gain_code = None if gain_code is None else int(gain_code)
+        if self._gain_code is not None and self._gain_code not in range(7):
+            raise ValueError("gain_code 仅支持 0–6，未配置时应使用 None")
         if self._gain_code is not None:
             # 发送了增益指令后，缩放用的增益要跟着变，否则 µV 值错 24 倍
             _gmap = {0: 1.0, 1: 2.0, 2: 4.0, 3: 6.0, 4: 8.0, 5: 12.0, 6: 24.0}
@@ -130,13 +137,16 @@ class OpenBCISource(DataSource):
 
         self._ser = None
         self._thread = None
+        self._reader_error = None
+        self._handshake_ack = None
+        self._handshake_error = None
         self._stop_event = threading.Event()
         self._queue = queue.Queue()
 
         # 帧级同步统计（时间同步地基）：记录设备侧帧编号 + 电脑接收单调时间 + 丢帧分类。
         # byte1 帧编号语义（RT-BCI 协议文档）：
         #   - 8ch：byte1 = 样本计数（0~255 回绕），每帧 +1。
-        #   - 16ch 有线 Daisy：byte1 bit0 = 前/后 8 通道（0=前8，1=后8），bit1~7 = 样本计数
+        #   - 16ch 有线 Daisy：byte1 奇数 = 前8，偶数 = 后8，bit1~7 关联样本计数
         #     （0~127 回绕），每两帧拼一个完整样本，byte1 仍每帧 +1。
         #   - 16ch Wi-Fi：两包相同帧号（HTTP/TCP 传输，本串口驱动不覆盖，见评估报告）。
         # 这里按「byte1 每帧 +1（mod 256）」做帧级丢帧检测；样本级语义见评估报告。
@@ -177,7 +187,7 @@ class OpenBCISource(DataSource):
     @property
     def full_scale_uv(self) -> float:
         """满量程（µV）= VREF/gain。gain 24 → 4.5e6/24 = 187500。"""
-        return VREF_UV / self._gain
+        return self._scale * (2 ** 23) if self._scale else VREF_UV / self._gain
 
     @property
     def alpha_level(self) -> float:
@@ -191,7 +201,13 @@ class OpenBCISource(DataSource):
         if self._ser is None:
             self._ser = serial.Serial(self._port, self._baudrate, timeout=0.05)
         self._stop_event.clear()
-        self._handshake()
+        self._reader_error = None
+        try:
+            self._handshake()
+        except Exception:
+            self._ser.close()
+            self._ser = None
+            raise
         self._thread = threading.Thread(target=self._reader_loop, daemon=True)
         self._thread.start()
 
@@ -201,6 +217,8 @@ class OpenBCISource(DataSource):
         失败不致命：reader 线程仍会尝试读帧（若板子已自行开始流式）。
         """
         ser = self._ser
+        self._handshake_ack = False
+        self._handshake_error = None
         if ser is None:
             return
         try:
@@ -212,6 +230,7 @@ class OpenBCISource(DataSource):
                 d = ser.read(200)
                 if d:
                     buf += d
+            self._handshake_ack = b"$$$" in buf
             # 可选：设置增益（打满 Railed 时把 gain_code 设为 0 = 1x）
             # 固件 BCI_parse 用紧凑格式：x{通道}{power_down}{增益}{input}{bias}{srb2}{srb1}X
             if self._gain_code is not None:
@@ -224,8 +243,9 @@ class OpenBCISource(DataSource):
                         ser.write(f"x{nm}0{self._gain_code}0000X".encode())
                         time.sleep(0.005)
             ser.write(b"b")  # 开始采集
-        except Exception:
-            pass
+        except Exception as exc:
+            self._handshake_error = str(exc) or type(exc).__name__
+            raise RuntimeError(f"串口握手或启动失败: {self._port}") from exc
 
     def stop(self) -> None:
         self._stop_event.set()
@@ -286,7 +306,8 @@ class OpenBCISource(DataSource):
                 raw = ser.read(ser.in_waiting or 1)
                 if not raw:
                     continue
-            except Exception:
+            except Exception as exc:
+                self._reader_error = str(exc) or type(exc).__name__
                 break
             batch_recv = time.monotonic()
             for frame in scanner.feed(raw):
@@ -296,7 +317,7 @@ class OpenBCISource(DataSource):
                     self._queue.put(ch)
                 else:
                     board = frame[1] & 1
-                    if board == 0:
+                    if board == 1:
                         pending_main = (frame[1], ch)
                     elif pending_main is not None and frame[1] == (pending_main[0] + 1) % 256:
                         self._queue.put(np.concatenate([pending_main[1], ch]))
@@ -348,6 +369,10 @@ class OpenBCISource(DataSource):
         with self._frame_log_lock:
             result["frame_log_overflow"] = self._frame_log_overflow
         result["queued_samples"] = self._queue.qsize()
+        result["reader_alive"] = self._thread.is_alive() if self._thread is not None else None
+        result["reader_error"] = self._reader_error
+        result["handshake_ack"] = self._handshake_ack
+        result["handshake_error"] = self._handshake_error
         return result
 
     def drain_frame_log(self) -> list:

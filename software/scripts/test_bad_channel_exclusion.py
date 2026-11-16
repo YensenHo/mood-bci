@@ -32,6 +32,10 @@ quality = compute_channel_quality(np.array([np.ones(fs*2)*187500, np.ones(fs*2)*
                                              np.sin(2*np.pi*10*t)*10]), fs,
                                   full_scale_uv=187500)
 assert [q["status"] for q in quality] == ["bad", "bad", "good"]
+# 自定义量程时 RMS 判定应按量程变化，而非固定 150000 µV。
+large_scale = compute_channel_quality(np.array([150001 + np.sin(2*np.pi*10*t)*10]), fs,
+                                      full_scale_uv=4500000)
+assert large_scale[0]['status'] == 'good'
 clean = np.tile(np.sin(2*np.pi*10*t), (8, 1))
 noise = clean + 20*np.sin(2*np.pi*25*t)
 assert not detect_25hz_concentration(clean, fs, [True]*8)["warning"]

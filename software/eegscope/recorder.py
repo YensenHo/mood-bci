@@ -23,6 +23,7 @@ from datetime import datetime
 import numpy as np
 
 from .edfio import write_csv, write_edf
+from . import __version__
 
 
 def config_snapshot(cfg) -> dict:
@@ -96,6 +97,7 @@ class SessionRecorder:
         self._recording = False
         self.markers: list = []
         self.alignment = None
+        self.acquisition = None
         self._board_stats_log: list = []
         # 逐帧记录（每板一个 list of (byte1 帧编号, 接收单调时间)），周期 drain 累加。
         self._frame_logs: list = []        # list[list[tuple[int,float]]]，长度=板数
@@ -213,11 +215,19 @@ class SessionRecorder:
     # ---- 落盘 ----
     def _default_dir(self) -> str:
         stamp = (self._started_at or datetime.now()).strftime("%Y%m%d_%H%M%S")
-        return os.path.join(self.recordings_dir, stamp)
+        path = os.path.join(self.recordings_dir, stamp)
+        suffix = 1
+        while os.path.exists(path):
+            path = os.path.join(self.recordings_dir, f"{stamp}_{suffix}")
+            suffix += 1
+        return path
 
     def save(self, out_dir: str) -> str:
         """把已缓冲数据写到 out_dir（session.npz + meta.json），返回 out_dir。"""
         os.makedirs(out_dir, exist_ok=True)
+        if any(os.path.exists(os.path.join(out_dir, name)) for name in
+               ("session.npz", "meta.json", "sync.json", "session_raw.edf", "session_filtered.edf", "session_raw.csv")):
+            raise FileExistsError("录制目录已存在数据，拒绝覆盖")
         raw = np.concatenate(self._raw, axis=1).astype(np.float32, copy=False)
         filtered = np.concatenate(self._filtered, axis=1).astype(np.float32, copy=False)
 
@@ -240,6 +250,7 @@ class SessionRecorder:
         self.export_status = exports
 
         meta = {
+            "software_version": __version__,
             "sample_rate": self.fs,
             "channel_names": self.channel_names,
             "source_type": self.source_type,
@@ -252,6 +263,7 @@ class SessionRecorder:
             "config": self.config_snapshot,
             "markers": self.markers,
             "alignment": self.alignment,
+            "acquisition": self.acquisition,
         }
         with open(os.path.join(out_dir, "meta.json"), "w", encoding="utf-8") as f:
             json.dump(meta, f, ensure_ascii=False, indent=2)

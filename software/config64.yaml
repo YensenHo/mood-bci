@@ -98,7 +98,7 @@ source:
 
 dsp:
   bandpass_hz: [0.5, 45.0] # 带通 0.5–45 Hz
-  notch_hz: [50.0, 25.0]   # 陷波：50Hz 工频 + 25Hz 硬件振荡
+  notch_hz: [50.0, 25.0]   # 可配置陷波；25Hz 来源未确定，滤波也会削弱邻近脑电
   notch_q: 30.0
 
 analysis:

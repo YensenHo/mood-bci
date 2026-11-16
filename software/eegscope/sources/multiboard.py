@@ -78,8 +78,15 @@ class MultiBoardSource(DataSource):
         pass
 
     def start(self) -> None:
-        for b in self._boards:
-            b.start()
+        started = []
+        try:
+            for b in self._boards:
+                b.start()
+                started.append(b)
+        except Exception:
+            for b in reversed(started):
+                b.stop()
+            raise
         # 板卡依次握手期间，较早启动的板会产生旧样本。
         self.discard_pre_boundary_samples()
 

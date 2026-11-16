@@ -33,8 +33,9 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 
 import numpy as np
 
-from eegscope.analysis import DEFAULT_BANDS, EmotionAnalyzer
+from eegscope.analysis import DEFAULT_BANDS, EmotionAnalyzer, detect_25hz_concentration
 from eegscope.dsp import SignalChain
+from eegscope.quality import compute_channel_quality
 
 
 def _load_meta(rec_dir: str) -> dict:
@@ -115,6 +116,17 @@ def run(rec_dir: str, window_sec: float, step_sec: float) -> int:
     faa_channels = tuple(a_cfg.get("faa_channels", ["F3", "F4"]))
 
     analyzer = EmotionAnalyzer(fs, channel_names, bands, faa_channels)
+    source_type = str(meta.get('source_type', ''))
+    hw = (cfg.get('source') or {}).get('openbci') or {}
+    gain_map = [1., 2., 4., 6., 8., 12., 24.]
+    gain_code = hw.get('gain_code', -1)
+    gain = gain_map[gain_code] if isinstance(gain_code, int) and 0 <= gain_code < 7 else float(hw.get('gain') or 24.)
+    scale = float(hw.get('scale_uv') or 0.)
+    full_scale = (scale * 2**23 if scale > 0 else 4.5e6 / gain) if source_type in ('OpenBCISource', 'MultiBoardSource') else 200.
+    mapping_unverified = (source_type in ('OpenBCISource', 'MultiBoardSource') and
+                          (not meta.get('software_version') or
+                           not (meta.get('acquisition') or {}).get('mapping_verified', False)))
+    integrity_warnings = (meta.get('acquisition') or {}).get('integrity_warnings') or []
 
     # 滑动窗
     win = int(round(window_sec * fs))
@@ -133,16 +145,31 @@ def run(rec_dir: str, window_sec: float, step_sec: float) -> int:
     valence = []
     arousal = []
     band_power = {b: [] for b in bands}
+    bad_counts, noise_flags = [], []
 
     for s0 in starts:
         win_data = sig[:, s0:s0 + win]
-        m = analyzer.analyze(win_data)
+        if raw is not None and raw.size > 0:
+            raw_win = np.asarray(raw)[:, s0:s0 + win]
+            quality = compute_channel_quality(raw_win, fs, full_scale_uv=full_scale)
+            valid = [q['status'] != 'bad' and name.strip().upper() not in ('NC', '', 'REF', 'GND')
+                     for q, name in zip(quality, channel_names)]
+            interference = detect_25hz_concentration(raw_win, fs, valid)
+        else:
+            valid = [False] * n_ch  # 滤波后无法可靠识别原始饱和。
+            interference = {'warning': False, 'available': False}
+        m = analyzer.analyze(win_data, valid)
+        if mapping_unverified or integrity_warnings or interference['warning']:
+            m['faa'], m['faa_ok'] = None, False
+        bad_counts.append(sum(not v for v in valid))
+        noise_flags.append(bool(interference['warning']))
         center = (s0 + win / 2.0) / fs
         t_axis.append(center)
         faa.append(m["faa"] if m["faa_ok"] and m["faa"] is not None else np.nan)
         faa_ok.append(bool(m["faa_ok"]))
-        valence.append(m["valence"] if m["valence"] is not None else np.nan)
-        arousal.append(m["arousal"] if m["arousal"] is not None else np.nan)
+        # 此脚本没有验证或加载被试内基线，不能输出效价/唤醒度。
+        valence.append(np.nan)
+        arousal.append(np.nan)
         for b in bands:
             v = m["bands"].get(b)
             band_power[b].append(v if v is not None else np.nan)
@@ -165,11 +192,13 @@ def run(rec_dir: str, window_sec: float, step_sec: float) -> int:
         arousal=arousal,
         band_names=np.array(band_names),
         band_power=bp,
+        excluded_channels=np.asarray(bad_counts),
+        interference_25hz=np.asarray(noise_flags),
     )
 
     # 汇总真实数字
     faa_mean, faa_std, faa_n = _finite_stats(faa)
-    band_means = {b: float(np.nanmean(band_power[b])) for b in band_names}
+    band_means = {b: _finite_stats(band_power[b])[0] for b in band_names}
     alpha = np.asarray(band_power["alpha"] if "alpha" in band_power else [np.nan])
     alpha_peak_t = float(t_axis[int(np.nanargmax(alpha))]) if np.isfinite(alpha).any() else None
 
@@ -185,6 +214,14 @@ def run(rec_dir: str, window_sec: float, step_sec: float) -> int:
     lines.append(f"- **采样率**：{fs:g} Hz")
     lines.append(f"- **数据来源**：{used}（通道名：{', '.join(channel_names)}）")
     lines.append(f"- **marker 数量**：{len(markers)}")
+    lines.append(f"- **25 Hz 成分异常集中**：{sum(noise_flags)}/{len(noise_flags)} 窗（启发式，不能确定来源）")
+    lines.append("- **效价/唤醒度**：未载入有效个人基线，已停用。")
+    if mapping_unverified:
+        lines.append("- **警告**：硬件通道映射或记录版本未验证，FAA 已停用。")
+    if integrity_warnings:
+        lines.append("- **警告**：采集记录存在完整性异常，FAA 已停用。")
+    if raw is None or raw.size == 0:
+        lines.append("- **警告**：缺少原始数据，无法检查饱和，所有通道已排除。")
     if markers:
         lines.append("")
         lines.append("### Markers")

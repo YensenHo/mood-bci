@@ -29,7 +29,7 @@ class SignalChain:
         lo, hi = self.bandpass_hz
         self.sos_bp = butter(4, [lo, hi], btype="bandpass", fs=self.fs, output="sos")
 
-        # 多个陷波（50Hz 工频 + 25Hz 硬件振荡等）
+        # 多个可配置陷波；25 Hz 成分的来源尚未确定。
         self.notches = []
         for f0 in self.notch_hz:
             b, a = iirnotch(f0, notch_q, fs=self.fs)

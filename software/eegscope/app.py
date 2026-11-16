@@ -36,7 +36,7 @@ class MainWindow(QMainWindow):
 
         self.dsp = SignalChain(cfg.sample_rate, cfg.dsp.bandpass_hz,
                                cfg.dsp.notch_hz, cfg.dsp.notch_q)
-        self.analyzer = EmotionAnalyzer(cfg.sample_rate, cfg.channels,
+        self.analyzer = EmotionAnalyzer(cfg.sample_rate, source.channel_names,
                                         cfg.analysis.bands, cfg.analysis.faa_channels)
 
         src_label = "合成数据" if getattr(source, "is_synthetic", False) else "真实硬件"
@@ -51,6 +51,8 @@ class MainWindow(QMainWindow):
         # 指标显示平滑（EMA），降低低 alpha 时 FAA/效价/唤醒度的噪声抖动
         self._ema_state = {}
         self._last_valid_channels = None
+        self._integrity_warning = None
+        self._record_start_stats = []
 
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
@@ -186,7 +188,7 @@ class MainWindow(QMainWindow):
         self.info_label.setStyleSheet("color: #999;")
         bar.addWidget(self.info_label)
         if hasattr(self.source, "discard_pre_boundary_samples"):
-            sync_notice = QLabel("多板未硬件同步")
+            sync_notice = QLabel("多板未硬件同步 · 板序未核验")
             sync_notice.setStyleSheet("color: #e69f00;")
             bar.addWidget(sync_notice)
         bar.addStretch(1)
@@ -269,6 +271,18 @@ class MainWindow(QMainWindow):
             self.source.drain_frame_log()
         self.recorder.start()
         self.recorder.alignment = alignment
+        self._integrity_warning = None
+        if hasattr(self.source, "board_stats"):
+            self._record_start_stats = self.source.board_stats()
+        elif hasattr(self.source, "frame_stats"):
+            self._record_start_stats = [self.source.frame_stats()]
+        else:
+            self._record_start_stats = []
+        if hasattr(self.source, "board_ports"):
+            self.recorder.acquisition = {"ports_in_channel_order": self.source.board_ports(),
+                                         "mapping_verified": False,
+                                         "integrity_warnings": [],
+                                         "note": "串口顺序不是物理板身份的证明，请另行验证接线映射。"}
         self.record_btn.setText("停止录制")
         self.info_label.setText("录制中…")
 
@@ -367,6 +381,22 @@ class MainWindow(QMainWindow):
             stats = None
         if stats is not None:
             rec.record_board_stats(stats)
+            for i, (current, initial) in enumerate(zip(stats, self._record_start_stats)):
+                keys = ("n_dropped_est", "n_dup_or_unknown", "n_out_of_order", "frame_log_overflow")
+                changed = [k for k in keys if current.get(k, 0) > initial.get(k, 0)]
+                if current.get("reader_alive") is False or current.get("reader_error"):
+                    changed.append("reader_stopped")
+                last = current.get("last_recv_s")
+                if current.get("reader_alive") is True and last is not None and time.monotonic() - last > 2:
+                    changed.append("no_frames_2s")
+                if changed and self._integrity_warning is None:
+                    self._integrity_warning = f"板{i + 1}采集异常：{', '.join(changed)}"
+                    self.calibrator.reset()
+                    self._ema_state.clear()
+                    if rec.acquisition is None:
+                        rec.acquisition = {"integrity_warnings": []}
+                    rec.acquisition.setdefault("integrity_warnings", []).append({
+                        "time_s": rec.monotonic_seconds(), "board": i + 1, "events": changed})
         # 2) 逐帧记录（有界 drain）
         if hasattr(src, "drain_frame_logs"):
             logs = src.drain_frame_logs()
@@ -462,7 +492,10 @@ class MainWindow(QMainWindow):
             self.recorder.record_channel_quality(valid, reasons, interference)
 
         # 基线校准（P1 被试内 baseline）：采集中累加样本；已校准则 z-score
-        if self._baseline_mode and not interference["warning"]:
+        if self._integrity_warning:
+            metrics = self.analyzer._empty_result()
+            metrics["note"] = self._integrity_warning
+        if self._baseline_mode and not interference["warning"] and not self._integrity_warning:
             self.calibrator.add_sample(metrics)
         if self.calibrator.calibrated:
             metrics = self.calibrator.zscore(metrics)
@@ -472,7 +505,7 @@ class MainWindow(QMainWindow):
             metrics["valence"] = None
         if not self.calibrator.has_calibration("arousal"):
             metrics["arousal"] = None
-        if interference["warning"]:
+        if interference["warning"] or self._integrity_warning:
             metrics["valence"] = None
             metrics["arousal"] = None
 
@@ -519,7 +552,9 @@ class MainWindow(QMainWindow):
                     self.info_label.setText(f"FAA {disp['faa']:+.3f}")
         else:
             self.info_label.setText(metrics.get("note", ""))
-        if interference["warning"]:
+        if self._integrity_warning:
+            self.info_label.setText("警告：" + self._integrity_warning + "；本次录制指标暂停")
+        elif interference["warning"]:
             self.info_label.setText("警告：多数有效通道 25 Hz 成分异常集中，暂停情绪显示和基线采集")
 
     def _ema(self, key, value, alpha=0.3):
@@ -556,7 +591,10 @@ def run_app(cfg, source, eye_tracker=None):
     app = QApplication.instance() or QApplication(sys.argv)
     setup_theme()
     source.start()
-    win = MainWindow(cfg, source, eye_tracker=eye_tracker)
-    win.resize(1280, 800)
-    win.show()
-    sys.exit(app.exec())
+    try:
+        win = MainWindow(cfg, source, eye_tracker=eye_tracker)
+        win.resize(1280, 800)
+        win.show()
+        sys.exit(app.exec())
+    finally:
+        source.stop()
