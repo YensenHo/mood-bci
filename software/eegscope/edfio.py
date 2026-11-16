@@ -37,9 +37,12 @@ def write_edf(path: str, data, fs: float, channel_names: list, started_at=None) 
         pmin = data.min(axis=1)
         pmax = data.max(axis=1)
         span = pmax - pmin
-        span = np.where(span < 1e-6, 1.0, span)
-        pmin = pmin - 0.01 * span
-        pmax = pmax + 0.01 * span
+        # EDF 数值字段最多 8 字符。高直流且平线的通道若只留 0.01 µV，
+        # 两个边界会四舍五入成同一数值，导致整份 EDF 导出失败。
+        margin = np.maximum(0.01 * np.maximum(span, 1.0),
+                            1e-5 * np.maximum(np.abs(pmin), np.abs(pmax)))
+        pmin = pmin - margin
+        pmax = pmax + margin
 
         dig_min, dig_max = -32768, 32767
         header_bytes = 256 + 256 * n_ch

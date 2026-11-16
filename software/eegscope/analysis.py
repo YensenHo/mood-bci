@@ -41,6 +41,26 @@ def welch_psd(sig, fs, nperseg=None):
     return freqs, psd
 
 
+def detect_25hz_concentration(raw, fs, valid_channels):
+    """保守初筛共同窄带成分，不判定噪声来源或等同阻抗检测。"""
+    raw = np.asarray(raw, dtype=np.float64)
+    valid = np.asarray(valid_channels, dtype=bool)
+    if raw.ndim != 2 or valid.shape != (raw.shape[0],) or raw.shape[1] < fs:
+        return {"available": False, "warning": False}
+    valid = valid & np.isfinite(raw).all(axis=1)
+    if valid.sum() < 4 or fs / 2 <= 26:
+        return {"available": False, "warning": False}
+    freqs, psd = welch_psd(raw[valid], fs)
+    total = psd[:, (freqs >= 1) & (freqs <= min(45, fs / 2))].sum(axis=1)
+    narrow = psd[:, (freqs >= 24) & (freqs <= 26)].sum(axis=1)
+    ratios = np.divide(narrow, total, out=np.zeros_like(total), where=total > 0)
+    fraction = float(np.mean(ratios > 0.5))
+    return {"available": True, "warning": fraction >= 0.5,
+            "fraction_channels_over_half_power": fraction,
+            "n_channels": int(valid.sum()),
+            "note": "24–26 Hz 占 1–45 Hz 功率超过一半的通道比例；启发式筛查，非噪声来源诊断。"}
+
+
 def band_power_map(data, fs, band_lo, band_hi):
     """逐通道频带功率：对每通道用 `welch_psd` 求 PSD，再对 [band_lo, band_hi)
     频带做梯形积分，返回每通道频带功率 `np.ndarray (n_ch,)`（µV²）。

@@ -48,6 +48,12 @@ def test_edf_roundtrip():
             assert signal.sampling_frequency == fs
             assert len(signal.data) == len(t)
             np.testing.assert_allclose(signal.data, x[i], atol=0.01)
+        # 实际故障：高直流、贴近正负量程的平线通道不可让 EDF 导出失败。
+        flat = np.stack([np.full(125, 187499.984375), np.full(125, -187500.0)])
+        assert write_edf(path, flat, fs, ['O1', 'Oz'])
+        edf = edfio.read_edf(path, lazy_load_data=False)
+        for i, signal in enumerate(edf.signals):
+            np.testing.assert_allclose(signal.data, flat[i], atol=0.01)
 
 
 def test_nonblocking_four_boards():

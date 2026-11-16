@@ -9,7 +9,7 @@ os.environ.setdefault("QT_QPA_PLATFORM", "offscreen")
 sys.path.insert(0, str(Path(__file__).resolve().parents[1]))
 import numpy as np
 from PySide6.QtWidgets import QApplication
-from eegscope.analysis import EmotionAnalyzer
+from eegscope.analysis import EmotionAnalyzer, detect_25hz_concentration
 from eegscope.viz import compute_channel_quality
 
 fs = 125
@@ -32,6 +32,11 @@ quality = compute_channel_quality(np.array([np.ones(fs*2)*187500, np.ones(fs*2)*
                                              np.sin(2*np.pi*10*t)*10]), fs,
                                   full_scale_uv=187500)
 assert [q["status"] for q in quality] == ["bad", "bad", "good"]
+clean = np.tile(np.sin(2*np.pi*10*t), (8, 1))
+noise = clean + 20*np.sin(2*np.pi*25*t)
+assert not detect_25hz_concentration(clean, fs, [True]*8)["warning"]
+assert detect_25hz_concentration(noise, fs, [True]*8)["warning"]
+assert not detect_25hz_concentration(noise, fs, [True]*3+[False]*5)["available"]
 
 # 模拟真实界面窗口：原始质量决定过滤数据的掩码，且数据本身不被修改。
 from eegscope import app as appmod
@@ -56,6 +61,16 @@ window._raw_hist[9] = 187500  # F3 饱和时 FAA 应停用
 window._run_analysis()
 assert window._last_valid_channels[9] is False
 assert window.emotion.faa_label.text() == "需 F3/F4"
+# 25 Hz 共同成分明显时不使用该窗口累积基线，也不显示情绪二维点。
+window._raw_hist = np.tile(noise[0], (64, 1)) * 10
+window.waveform.hist = window._raw_hist.copy()
+window._baseline_mode = True
+window.calibrator.reset()
+window._run_analysis()
+assert window.calibrator.n_samples == 0
+assert "25 Hz" in window.info_label.text()
+window._baseline_mode = False
+window._raw_hist = raw.copy()
 with tempfile.TemporaryDirectory() as tmp:
     appmod._RECORDINGS_DIR = tmp
     window._start_recording()

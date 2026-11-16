@@ -14,7 +14,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel,
 
 from . import _runtime
 from .analysis import (BaselineCalibrator, EmotionAnalyzer, band_power_map,
-                       welch_psd)
+                       detect_25hz_concentration, welch_psd)
 from .dsp import SignalChain
 from .recorder import SessionRecorder, config_snapshot
 from .remote import StreamUploader
@@ -289,6 +289,7 @@ class MainWindow(QMainWindow):
             except Exception:
                 pass
         out = self.recorder.stop()
+        export_status = self.recorder.export_status
         self.recorder = None
         # 复位按钮（blockSignals 防止再次触发 toggled 递归）
         self.record_btn.blockSignals(True)
@@ -296,7 +297,11 @@ class MainWindow(QMainWindow):
         self.record_btn.blockSignals(False)
         self.record_btn.setText("录制")
         if out:
-            self.info_label.setText(f"已保存: {os.path.basename(out)}")
+            failed = [name for name, ok in (export_status or {}).items() if not ok]
+            if failed:
+                self.info_label.setText(f"NPZ 已保存；导出失败: {', '.join(failed)}")
+            else:
+                self.info_label.setText(f"已保存: {os.path.basename(out)}")
 
     def _on_upload_toggled(self, checked):
         if checked:
@@ -450,13 +455,14 @@ class MainWindow(QMainWindow):
             self.calibrator.reset()
         self._last_valid_channels = mask
         metrics = self.analyzer.analyze(data, valid_channels=valid)
+        interference = detect_25hz_concentration(raw_win, self.cfg.sample_rate, valid)
         if self.recorder is not None and self.recorder.is_recording:
             reasons = [(["预留或参考通道"] if nm.strip().upper() in ("NC", "", "REF", "GND")
                         else r["reasons"]) for nm, r in zip(self.source.channel_names, quality)]
-            self.recorder.record_channel_quality(valid, reasons)
+            self.recorder.record_channel_quality(valid, reasons, interference)
 
         # 基线校准（P1 被试内 baseline）：采集中累加样本；已校准则 z-score
-        if self._baseline_mode:
+        if self._baseline_mode and not interference["warning"]:
             self.calibrator.add_sample(metrics)
         if self.calibrator.calibrated:
             metrics = self.calibrator.zscore(metrics)
@@ -465,6 +471,9 @@ class MainWindow(QMainWindow):
         if not self.calibrator.has_calibration("valence"):
             metrics["valence"] = None
         if not self.calibrator.has_calibration("arousal"):
+            metrics["arousal"] = None
+        if interference["warning"]:
+            metrics["valence"] = None
             metrics["arousal"] = None
 
         # 显示层 EMA 平滑（不改变分析器输出的原始指标）
@@ -510,6 +519,8 @@ class MainWindow(QMainWindow):
                     self.info_label.setText(f"FAA {disp['faa']:+.3f}")
         else:
             self.info_label.setText(metrics.get("note", ""))
+        if interference["warning"]:
+            self.info_label.setText("警告：多数有效通道 25 Hz 成分异常集中，暂停情绪显示和基线采集")
 
     def _ema(self, key, value, alpha=0.3):
         if value is None:

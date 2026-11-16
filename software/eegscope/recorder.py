@@ -101,6 +101,7 @@ class SessionRecorder:
         self._frame_logs: list = []        # list[list[tuple[int,float]]]，长度=板数
         self._gap_log: list = []           # 每次 read 的缺口/截断信息
         self._quality_log: list = []
+        self.export_status = None
 
     @property
     def is_recording(self) -> bool:
@@ -192,12 +193,12 @@ class SessionRecorder:
             "gap": dict(gap_info or {}),
         })
 
-    def record_channel_quality(self, valid, reasons) -> None:
+    def record_channel_quality(self, valid, reasons, interference=None) -> None:
         if self._recording:
             self._quality_log.append({"t_monotonic": round(self.monotonic_seconds(), 6),
                                       "t_samples": round(self.elapsed_seconds, 6),
                                       "valid": [bool(x) for x in valid],
-                                      "reasons": reasons})
+                                      "reasons": reasons, "interference": interference})
 
     def stop(self):
         """停止录制并落盘。返回保存目录；无数据或未在录制时返回 None。"""
@@ -236,6 +237,7 @@ class SessionRecorder:
             "filtered_edf": write_edf(os.path.join(out_dir, "session_filtered.edf"), filtered, self.fs, self.channel_names, self._started_at),
             "raw_csv": write_csv(os.path.join(out_dir, "session_raw.csv"), raw, self.fs, self.channel_names),
         }
+        self.export_status = exports
 
         meta = {
             "sample_rate": self.fs,
