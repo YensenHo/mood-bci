@@ -76,3 +76,5 @@ jobs:
         with:
           files: artifacts/*.zip
           generate_release_notes: true
+          prerelease: ${{ github.ref == 'refs/tags/v1.1.5' }}
+          body: ${{ github.ref == 'refs/tags/v1.1.5' && '测试版：尚未经过真实脑电板验证。修复录制样本积压处理、逐块滤波伪影和 EDF 导出格式，增加录制时长对照。模拟测试通过；多板硬件同步及长时间掉线仍需实机验证，旧数据的缺失与饱和不能通过本版本恢复。' || '' }}

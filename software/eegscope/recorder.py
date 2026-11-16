@@ -34,6 +34,10 @@ def config_snapshot(cfg) -> dict:
     # 以下字段在部分数据源/配置缺失时优雅降级，不影响录制。
     try:
         snap["source"] = {"type": getattr(cfg.source, "type", "")}
+        hw = getattr(cfg.source, "openbci", None)
+        if hw is not None:
+            snap["source"]["openbci"] = {k: getattr(hw, k, None) for k in
+                                           ("port", "ports", "n_channels", "gain", "gain_code", "scale_uv")}
     except AttributeError:
         snap["source"] = {"type": ""}
     try:
@@ -88,6 +92,7 @@ class SessionRecorder:
         self._n_samples = 0
         self._started_at: datetime | None = None
         self._start_monotonic: float | None = None   # 录制起点的电脑单调时钟（time.monotonic）
+        self._stop_monotonic: float | None = None
         self._recording = False
         self.markers: list = []
         self._board_stats_log: list = []
@@ -108,7 +113,7 @@ class SessionRecorder:
         """录制起点至今的电脑单调时钟秒数（time.monotonic 差值）。"""
         if self._start_monotonic is None:
             return 0.0
-        return time.monotonic() - self._start_monotonic
+        return (self._stop_monotonic or time.monotonic()) - self._start_monotonic
 
     # ---- 录制生命周期 ----
     def start(self) -> None:
@@ -189,6 +194,7 @@ class SessionRecorder:
         if not self._recording:
             return None
         self._recording = False
+        self._stop_monotonic = time.monotonic()
         if self._n_samples == 0:
             return None
         return self.save(self._default_dir())
@@ -215,18 +221,20 @@ class SessionRecorder:
         # 导出标准格式（主流脑电软件 EEGLAB/MNE 可直接读）：
         #   - session_raw.edf / session_filtered.edf：EDF+ 标准格式
         #   - session_raw.csv：OpenBCI 同款 CSV（Excel/Python 可读）
-        write_edf(os.path.join(out_dir, "session_raw.edf"),
-                  raw, self.fs, self.channel_names)
-        write_edf(os.path.join(out_dir, "session_filtered.edf"),
-                  filtered, self.fs, self.channel_names)
-        write_csv(os.path.join(out_dir, "session_raw.csv"),
-                  raw, self.fs, self.channel_names)
+        exports = {
+            "raw_edf": write_edf(os.path.join(out_dir, "session_raw.edf"), raw, self.fs, self.channel_names, self._started_at),
+            "filtered_edf": write_edf(os.path.join(out_dir, "session_filtered.edf"), filtered, self.fs, self.channel_names, self._started_at),
+            "raw_csv": write_csv(os.path.join(out_dir, "session_raw.csv"), raw, self.fs, self.channel_names),
+        }
 
         meta = {
             "sample_rate": self.fs,
             "channel_names": self.channel_names,
             "source_type": self.source_type,
             "duration_seconds": round(self.elapsed_seconds, 6),
+            "wall_duration_seconds": round(self.monotonic_seconds(), 6),
+            "duration_difference_seconds": round(self.monotonic_seconds() - self.elapsed_seconds, 6),
+            "export_status": exports,
             "n_samples": int(self._n_samples),
             "recorded_at": (self._started_at or datetime.now()).isoformat(),
             "config": self.config_snapshot,

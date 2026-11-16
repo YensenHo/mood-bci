@@ -40,6 +40,7 @@ def main() -> int:
     # 模拟 3 秒实时数据流（覆盖 source→dsp→viz→analysis；analysis 需攒满 2s 窗）
     n_ticks = int(3.0 * 1000 / cfg.viz.refresh_ms)
     for _ in range(n_ticks):
+        win._last_tick -= cfg.viz.refresh_ms / 1000.0
         win._tick()
     app.processEvents()  # 让 Qt 处理重绘/信号
 
@@ -88,6 +89,7 @@ def main() -> int:
     # 模拟闭眼按钮再跑 2 秒，验证 alpha 上升后 FAA 面板仍正常刷新
     win.eyes_btn.setChecked(True)
     for _ in range(int(2.0 * 1000 / cfg.viz.refresh_ms)):
+        win._last_tick -= cfg.viz.refresh_ms / 1000.0
         win._tick()
     app.processEvents()
     print(f"[GUI smoke] 模拟闭眼后 FAA 面板文本: {win.emotion.faa_label.text()!r}")

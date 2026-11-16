@@ -100,8 +100,7 @@ class FrameScanner:
 class OpenBCISource(DataSource):
     """OpenBCI 兼容串口数据源（8ch 或 16ch Daisy）。
 
-    read() 由后台线程持续解析串口帧填充队列；read() 阻塞到拿到 ≥1 样本
-    （掉线兜底返回 1 个零样本，避免下游空数组报错）。
+    后台线程持续解析串口帧填充队列；无数据时返回空数组，不伪造样本。
     """
 
     def __init__(self, port, baudrate=115200, n_channels=16, gain=24.0,
@@ -155,6 +154,8 @@ class OpenBCISource(DataSource):
         # 时间戳语义：一次串口 read() 可能带回多帧，这些帧共享同一个 read 返回后的
         # time.monotonic()（=「批次接收时间」），是到达时间的上界，不是逐帧精确到达时刻。
         self._frame_log: collections.deque = collections.deque(maxlen=65536)
+        self._frame_log_lock = threading.Lock()
+        self._frame_log_overflow = 0
 
     # ---- DataSource 接口 ----
     @property
@@ -253,12 +254,25 @@ class OpenBCISource(DataSource):
         # 掉线/欠采时缺口 >0，供录制层标记时间缺口，不把补零误当连续数据。
         self._last_read_gap = max(0, n - len(out))
         if not out:
-            return np.zeros((self._n_ch, 1), dtype=np.float64)  # 掉线兜底（零填充）
+            return np.empty((self._n_ch, 0), dtype=np.float64)
         return np.stack(out, axis=1).astype(np.float64)
 
     def last_read_gap(self) -> int:
         """上次 read() 的样本缺口（请求数 − 实际拿到数）。0 = 无缺口。"""
         return int(getattr(self, "_last_read_gap", 0))
+
+    def read_available(self, max_samples: int) -> np.ndarray:
+        """不阻塞地读取已接收样本；无数据返回空数组，绝不伪造零样本。"""
+        out = []
+        for _ in range(max(0, int(max_samples))):
+            try:
+                out.append(self._queue.get_nowait())
+            except queue.Empty:
+                break
+        self._last_read_gap = 0  # 非阻塞读取并未请求等待未来样本
+        if not out:
+            return np.empty((self._n_ch, 0), dtype=np.float64)
+        return np.stack(out, axis=1).astype(np.float64)
 
     # ---- 后台读串口线程 ----
     def _reader_loop(self) -> None:
@@ -274,8 +288,9 @@ class OpenBCISource(DataSource):
                     continue
             except Exception:
                 break
+            batch_recv = time.monotonic()
             for frame in scanner.feed(raw):
-                self._update_frame_stats(frame[1], time.monotonic())
+                self._update_frame_stats(frame[1], batch_recv)
                 ch = parse_cyton_frame(frame, self._gain, self._scale)
                 if not self._daisy:
                     self._queue.put(ch)
@@ -318,20 +333,28 @@ class OpenBCISource(DataSource):
         if s["first_recv_s"] is None:
             s["first_recv_s"] = recv_monotonic
         s["last_recv_s"] = recv_monotonic
-        self._frame_log.append((int(counter), recv_monotonic))
+        with self._frame_log_lock:
+            if len(self._frame_log) == self._frame_log.maxlen:
+                self._frame_log_overflow += 1
+            self._frame_log.append((int(counter), recv_monotonic))
         return {"diff_class": cls, "counter": int(counter)}
 
     def frame_stats(self) -> dict:
         """返回帧级同步统计快照（供录制/同步层读取，只读）。"""
-        return dict(self._frame_stats)
+        result = dict(self._frame_stats)
+        with self._frame_log_lock:
+            result["frame_log_overflow"] = self._frame_log_overflow
+        result["queued_samples"] = self._queue.qsize()
+        return result
 
     def drain_frame_log(self) -> list:
         """取出并清空逐帧记录（(byte1 帧编号, 接收单调时间) 列表），供录制层周期落盘。
 
         有界 deque（maxlen 65536），长时间录制要周期 drain，否则只保留最近一截。
         """
-        out = list(self._frame_log)
-        self._frame_log.clear()
+        with self._frame_log_lock:
+            out = list(self._frame_log)
+            self._frame_log.clear()
         return out
 
 

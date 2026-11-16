@@ -10,7 +10,7 @@
 
 诚实边界：各板是独立 STM32、独立采样时钟，无硬件同步信号，
 跨板时间对齐靠「等样本数」对齐；长期漂移（ppm 级晶振误差）是硬件限制。
-对 ISC / 情绪这种秒级时间尺度的分析影响很小，对 ERP 这种毫秒级锁时分析需注意。
+不同板的实际偏移与漂移尚未实测，不能据此认定任何时间尺度的分析已对齐。
 """
 from __future__ import annotations
 
@@ -109,7 +109,7 @@ class MultiBoardSource(DataSource):
             for i, c in enumerate(chunks):
                 self._buffers[i] = c
             self._last_buffered = [int(c.shape[1]) for c in chunks]
-            return np.zeros((self._n_ch, 1), dtype=np.float64)
+            return np.empty((self._n_ch, 0), dtype=np.float64)
 
         # 每板只消费 min_len，多余部分存回缓冲（不静默丢弃未消费样本）
         out_parts = []
@@ -119,6 +119,27 @@ class MultiBoardSource(DataSource):
             self._buffers[i] = c[:, min_len:]
             self._last_buffered.append(int(c.shape[1] - min_len))
         return np.concatenate(out_parts, axis=0)
+
+    def read_available(self, max_samples: int) -> np.ndarray:
+        """拉取后台队列中已接收的数据，缓冲每板多余样本，不等待慢板。"""
+        limit = max(0, int(max_samples))
+        self._last_arrivals = []
+        for i, board in enumerate(self._boards):
+            # 慢板未跟上时，限制中间缓冲增长；其余样本仍留在后台队列。
+            room = max(0, max(limit, self._buffer_maxlen) - self._buffers[i].shape[1])
+            fresh = board.read_available(min(limit, room))
+            self._last_arrivals.append(fresh.shape[1])
+            if fresh.shape[1]:
+                self._buffers[i] = np.concatenate((self._buffers[i], fresh), axis=1)
+        self._last_board_gaps = [0] * len(self._boards)
+        count = min([limit] + [b.shape[1] for b in self._buffers])
+        if count == 0:
+            self._last_buffered = [b.shape[1] for b in self._buffers]
+            return np.empty((self._n_ch, 0), dtype=np.float64)
+        out = np.concatenate([b[:, :count] for b in self._buffers], axis=0)
+        self._buffers = [b[:, count:] for b in self._buffers]
+        self._last_buffered = [b.shape[1] for b in self._buffers]
+        return out
 
     def read_gap_info(self) -> dict:
         """返回上次 read() 的缺口/缓冲/溢出信息（供录制层标记，不静默丢样本）。
@@ -131,6 +152,8 @@ class MultiBoardSource(DataSource):
             "per_board_gap": list(getattr(self, "_last_board_gaps", [0] * len(self._boards))),
             "per_board_buffered": list(getattr(self, "_last_buffered", [0] * len(self._boards))),
             "per_board_overflow": list(self._buffer_overflow),
+            "per_board_queued": [b._queue.qsize() for b in self._boards],
+            "per_board_new_samples": list(getattr(self, "_last_arrivals", [])),
         }
 
     def board_ports(self):

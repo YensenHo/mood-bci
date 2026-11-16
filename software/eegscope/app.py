@@ -3,6 +3,7 @@ from __future__ import annotations
 
 import os
 import sys
+import time
 
 import numpy as np
 import pyqtgraph as pg
@@ -53,7 +54,8 @@ class MainWindow(QMainWindow):
         self.timer = QTimer(self)
         self.timer.timeout.connect(self._tick)
         self.timer.start(cfg.viz.refresh_ms)
-        self._frac = 0.0  # 分块读取的小数样本累积（保证平均采样率准确）
+        self._frac = 0.0
+        self._last_tick = time.monotonic()
         # 原始数据缓冲（未滤波）：电极接触检测要看「打满/平线」，滤波会把直流去掉
         self._raw_hist = np.zeros((source.n_channels, 0), dtype=np.float64)
 
@@ -191,6 +193,7 @@ class MainWindow(QMainWindow):
             self.timer.stop()
             self.start_btn.setText("继续")
         else:
+            self._last_tick = time.monotonic()
             self.timer.start(self.cfg.viz.refresh_ms)
             self.start_btn.setText("暂停")
 
@@ -224,6 +227,11 @@ class MainWindow(QMainWindow):
             self._stop_recording()
 
     def _start_recording(self):
+        # 不将上一会话/录制前的帧日志混入新会话。
+        if hasattr(self.source, "drain_frame_logs"):
+            self.source.drain_frame_logs()
+        elif hasattr(self.source, "drain_frame_log"):
+            self.source.drain_frame_log()
         # 新建一条时间线（每次录制独立起点），并（可选）启动眼动仪
         self.timeline = SyncTimeline()
         self.timeline.start()
@@ -247,6 +255,13 @@ class MainWindow(QMainWindow):
     def _stop_recording(self):
         if self.recorder is None:
             return
+        # 先消费已接收的积压，避免界面卡顿后停止录制时丢失最后几秒。
+        if hasattr(self.source, "read_available"):
+            limit = max(1, int(self.cfg.sample_rate * 5))
+            for _ in range(30):
+                if self._tick() < limit:
+                    break
+        self._record_sync()
         # 先停眼动仪（若在跑）
         if self.eye_tracker is not None:
             try:
@@ -352,13 +367,23 @@ class MainWindow(QMainWindow):
                     frame_number=s.frame_number, calibrated=s.calibrated)
 
     def _tick(self):
-        # 累积小数样本，保证平均读取速率 = sample_rate（50ms@250Hz 应读 12.5 样本/次）
-        self._frac += self.cfg.sample_rate * self.cfg.viz.refresh_ms / 1000.0
-        n = int(self._frac)
-        self._frac -= n
-        if n <= 0:
-            return
-        chunk = self.source.read(n)
+        now = time.monotonic()
+        elapsed = max(0.0, now - self._last_tick)
+        self._last_tick = now
+        if hasattr(self.source, "read_available"):
+            # 采集由板卡后台读取；界面延迟后拉取积压，不把 tick 当采样时钟。
+            chunk = self.source.read_available(max(1, int(self.cfg.sample_rate * 5)))
+        else:
+            # 合成/其他数据源按经过的实际时间产生样本，而非假定每次 tick 准时。
+            self._frac += self.cfg.sample_rate * elapsed
+            n = int(self._frac)
+            self._frac -= n
+            if n <= 0:
+                return
+            chunk = self.source.read(n)
+        if chunk.shape[1] == 0:
+            self._record_sync()
+            return 0
         # 远程上传：把原始 µV 块镜像发出去（非阻塞，内部队列 + 后台线程）
         if self.uploader is not None and self.uploader.is_connected:
             self.uploader.send(chunk)
@@ -374,11 +399,15 @@ class MainWindow(QMainWindow):
         if self.recorder is not None and self.recorder.is_recording:
             self.recorder.append(chunk, filtered)
             self._record_sync()
-            self.record_btn.setText(f"停止录制 {self.recorder.elapsed_seconds:.0f}s")
+            self.record_btn.setText(f"停止录制（墙钟 {self.recorder.monotonic_seconds():.0f}s / 数据 {self.recorder.elapsed_seconds:.0f}s）")
+            wall = self.recorder.monotonic_seconds()
+            if wall > 5 and abs(wall - self.recorder.elapsed_seconds) > 2:
+                self.info_label.setText("警告：墙钟时长与样本时长相差超过 2 秒，请检查采集及队列")
 
         self._tick_count += 1
         if self._tick_count % self._analysis_every == 0:
             self._run_analysis()
+        return chunk.shape[1]
 
     def _run_analysis(self):
         hist = self.waveform.hist
@@ -450,10 +479,7 @@ class MainWindow(QMainWindow):
         self.timer.stop()
         # 若正在录制，先落盘再退出
         if self.recorder is not None and self.recorder.is_recording:
-            try:
-                self.recorder.stop()
-            finally:
-                self.recorder = None
+            self._stop_recording()
         # 若正在上传，断开连接
         if self.uploader is not None:
             try:

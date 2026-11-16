@@ -224,7 +224,7 @@ def test_multiboard_buffering() -> None:
     for _ in range(3):
         mb._boards[1]._queue.put(np.ones(8))
     out2 = mb.read(10)
-    _ck(out2.shape == (16, 3), f"第二次 read 消费缓冲（实测 {out2.shape}）")
+    _ck(out2.shape == (16, 2), f"第二次 read 消费真实缓冲且不补零（实测 {out2.shape}）")
     _ck(mb._buffers[0].shape[1] == 0, "板A 缓冲已清空（未消费样本已用掉）")
 
 

@@ -78,7 +78,7 @@ def test_read_all_dead_fallback():
     for b in src._boards:
         b.read = lambda n: np.zeros((16, 0))  # 全部掉线 → 0 样本
     out = src.read(10)
-    assert out.shape == (64, 1), f"全掉线兜底应 (64,1)，实为 {out.shape}"
+    assert out.shape == (64, 0), f"全掉线应无样本，实为 {out.shape}"
 
 
 def test_single_board_regression():

@@ -56,15 +56,14 @@ def test_e2e_recording_entry() -> None:
     # 4 块假板（不 start 串口，手动喂帧填充 frame_stats + frame_log）
     mb = MultiBoardSource(ports=["COM1", "COM2", "COM3", "COM4"],
                           n_channels_per_board=16, channel_names=cfg.channels)
-    for bi, b in enumerate(mb._boards):
-        for c in range(200):
-            b._update_frame_stats(c, time.monotonic() + bi * 1e-6)
-
     eye = SimulatedEyeTracker(sample_rate=120.0, offset_s=0.25, drift_ppm=0.0,
                               loss_rate=0.0, invalid_rate=0.0, seed=3)
 
     win = appmod.MainWindow(cfg, mb, eye_tracker=eye)
     win._start_recording()
+    for bi, b in enumerate(mb._boards):
+        for c in range(200):
+            b._update_frame_stats(c, time.monotonic() + bi * 1e-6)
     _ck(win.recorder is not None and win.recorder.is_recording, "开始录制后 recorder 就绪")
     assert win.recorder is not None
     _ck(win.recorder.timeline is win.timeline, "SyncTimeline 已传入 recorder")
@@ -76,6 +75,9 @@ def test_e2e_recording_entry() -> None:
 
     # 手动驱动 _tick 几次（绕过 QTimer，确定性）
     for _ in range(10):
+        for board in mb._boards:
+            for _sample in range(7):
+                board._queue.put(np.ones(16))
         sched.tick()      # 记录已到计划时刻的刺激事件（软件记录时间）
         win._tick()
         time.sleep(0.02)   # 让眼动模拟器按真实时间产样本
