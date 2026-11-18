@@ -29,6 +29,7 @@ from __future__ import annotations
 
 import collections
 import queue
+import re
 import threading
 import time
 
@@ -61,6 +62,42 @@ def parse_cyton_frame(frame: bytes, gain: float = 24.0,
             v -= 0x1000000  # 24bit 符号扩展
         ch[i] = v * scale_uv
     return ch
+
+
+def parse_impedance_response(text: str | None, n_channels: int = 8) -> dict | None:
+    """防御式解析「z」命令的文本响应 → {1-based 通道号: 阻抗 Ω}。
+
+    OpenBCI 兼容板/克隆固件的 'z' 响应格式未定（本机无板载固件源码），这里
+    只做 best-effort，支持两种常见形态：
+      - 带通道标记：`Ch1: 12345 Ohm` / `Channel 2: 12.3 kOhm` / `Z3: 5200` / `CH4: 5.2 k`
+        （单位 kOhm/kΩ/k → ×1000；Ohm/Ω/ohm/空 → ×1）
+      - 纯数字列表（逗号/空格分隔，按 1..N 顺序），仅在数字个数 ≥ n_channels 时启用
+
+    诚实边界：解析不到任何通道标记或数字时返回 None（不补零、不臆造）；带通道
+    标记解析到几个就返回几个。真机格式须先用 scripts/capture_impedance.py 抓原始
+    字节确认，再按实际格式收敛本函数。
+    """
+    if not text:
+        return None
+    # 格式 1：通道标记 + 数值 + 可选单位
+    pat = re.compile(
+        r'(?:ch(?:annel)?|z)\s*[-_:]?\s*(\d{1,2})\s*[:=]?\s*'
+        r'([\d.]+)\s*(k)?\s*(?:ohm|Ω)?',
+        re.IGNORECASE)
+    result = {}
+    for m in pat.finditer(text):
+        ch = int(m.group(1))
+        if 1 <= ch <= 64:
+            val = float(m.group(2))
+            ohm = val * 1000.0 if (m.group(3) or '').lower() == 'k' else val
+            result[ch] = ohm
+    if result:
+        return result
+    # 格式 2：纯数字列表（无任何通道标记时）
+    nums = re.findall(r'[\d.]+', text)
+    if len(nums) >= n_channels and not re.search(r'[a-zA-Z]', text):
+        return {i + 1: float(nums[i]) for i in range(n_channels)}
+    return None
 
 
 class FrameScanner:
