@@ -540,6 +540,7 @@ class MainWindow(QMainWindow):
         else:
             self.spectrogram.img.clear()
 
+        self.info_label.setToolTip("")
         if metrics.get("faa_ok"):
             if self.calibrator.calibrated:
                 self.info_label.setText(f"FAA z {disp['faa']:+.2f}（已校准）")
@@ -551,11 +552,20 @@ class MainWindow(QMainWindow):
                 else:
                     self.info_label.setText(f"FAA {disp['faa']:+.3f}")
         else:
+            self.info_label.setToolTip("")
             self.info_label.setText(metrics.get("note", ""))
         if self._integrity_warning:
+            self.info_label.setToolTip("")
             self.info_label.setText("警告：" + self._integrity_warning + "；本次录制指标暂停")
         elif interference["warning"]:
-            self.info_label.setText("警告：多数有效通道 25 Hz 成分异常集中，暂停情绪显示和基线采集")
+            n_valid = interference.get("n_channels", 0)
+            fraction = interference.get("fraction_channels_over_half_power", 0.0)
+            n_flagged = round(n_valid * fraction)
+            self.info_label.setText(f"原始 25 Hz 预警：{n_flagged}/{n_valid} 通道超阈值")
+            self.info_label.setToolTip(
+                "原始 EEG 中，24–26 Hz 功率占 1–45 Hz 功率超过 50% 的有效通道比例达到阈值。"
+                "当前暂停情绪显示和基线采集。滤波后的波形不代表原始成分已消失。"
+            )
 
     def _ema(self, key, value, alpha=0.3):
         if value is None:

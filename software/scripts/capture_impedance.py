@@ -47,6 +47,8 @@ def main() -> int:
     ap.add_argument("port", nargs="?", help="串口设备，如 /dev/cu.usbserial-XXXX")
     ap.add_argument("-b", "--baudrate", type=int, default=115200)
     ap.add_argument("-n", "--seconds", type=float, default=3.0)
+    ap.add_argument("-c", "--channels", type=int, choices=(8, 16), default=16,
+                    help="板卡通道数；默认 16（RT-BCI 双 ADS1299/Daisy）")
     args = ap.parse_args()
 
     ports = list_ports()
@@ -63,24 +65,31 @@ def main() -> int:
 
     import serial
     ser = serial.Serial(args.port, args.baudrate, timeout=0.1)
+    try:
+        # 1) 握手：0xF0 → 等 "$$$"（跟 OpenBCISource._handshake 一致）。
+        # 流式 EEG 二进制帧不等于握手成功；失败时必须停止，不能继续把 z 发给
+        # 状态未知的固件，否则可能中断/改变正在运行的采集。
+        ser.reset_input_buffer()
+        ser.write(b"\xF0")
+        hand = read_until(ser, b"$$$", timeout=2.0)
+        handshake_ok = b"$$$" in hand
+        print(f"\n握手 0xF0 → 读到 {len(hand)} 字节，含 '$$$' = {handshake_ok}")
+        if not handshake_ok:
+            print("未收到握手确认；为避免误发命令，已中止，未发送 'z'。")
+            return 2
 
-    # 1) 握手：0xF0 → 等 "$$$"（跟 OpenBCISource._handshake 一致）
-    ser.reset_input_buffer()
-    ser.write(b"\xF0")
-    hand = read_until(ser, b"$$$", timeout=2.0)
-    print(f"\n握手 0xF0 → 读到 {len(hand)} 字节，含 '$$$' = {'$$$'.encode() in hand}")
+        # 2) 发 'z' 阻抗命令
+        ser.reset_input_buffer()
+        ser.write(b"z")
+        print(f"已发 'z'，抓取 {args.seconds}s 响应 ...")
 
-    # 2) 发 'z' 阻抗命令
-    ser.reset_input_buffer()
-    ser.write(b"z")
-    print(f"已发 'z'，抓取 {args.seconds}s 响应 ...")
-
-    # 3) 抓原始字节
-    t0 = time.time()
-    buf = bytearray()
-    while time.time() - t0 < args.seconds:
-        buf.extend(ser.read(ser.in_waiting or 1))
-    ser.close()
+        # 3) 抓原始字节
+        t0 = time.time()
+        buf = bytearray()
+        while time.time() - t0 < args.seconds:
+            buf.extend(ser.read(ser.in_waiting or 1))
+    finally:
+        ser.close()
     print(f"抓到 {len(buf)} 字节\n")
 
     # 4) 打印原始 hexdump（前 128 字节）
@@ -101,7 +110,8 @@ def main() -> int:
     print("\n=== best-effort 阻抗解析 ===")
     try:
         from eegscope.sources.openbci import parse_impedance_response
-        imp = parse_impedance_response("".join(chr(b) for b in buf if 32 <= b < 127), n_channels=8)
+        imp = parse_impedance_response("".join(chr(b) for b in buf if 32 <= b < 127),
+                                        n_channels=args.channels)
         if imp:
             for ch in sorted(imp):
                 print(f"  通道 {ch}: {imp[ch]:.0f} Ω  ({imp[ch]/1000:.1f} kΩ)")
