@@ -1,20 +1,22 @@
 #!/usr/bin/env python3
-"""发「z」命令抓 OpenBCI 兼容板的导联阻抗响应（验证 M3：ADS1299 LOFF 阻抗检测）。
+"""抓取 OpenBCI 兼容板的导联阻抗响应（探索性诊断，不等同校准阻抗测量）。
 
-板子到手、跑通 capture_serial.py 之后跑这个，判断克隆固件是否支持 'z' 阻抗检测、
-响应格式是什么（本机无板载固件源码，格式未知，所以先抓原始字节 + 文本，再 best-effort 解析）。
+重要：RT-BCI 本地串口协议仅记录 b、s、x…X，没有记录 z 阻抗命令。对 RT-BCI
+默认拒绝发送 z；只有用户已从固件资料确认命令适用，并显式传入
+--allow-undocumented-z 时才继续。该探测不能证明阻抗值已校准。
 
 用法（隔离环境跑）：
     # 1) 先不带端口，列出可用串口
     env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPATH= \\
         .venv/bin/python scripts/capture_impedance.py
 
-    # 2) 指定串口发 z、抓 3 秒响应
+    # 2) 仅在已从对应固件资料确认 z 命令后，显式抓取响应
     env -i HOME=$HOME PATH=/usr/bin:/bin:/usr/sbin:/sbin:/opt/homebrew/bin PYTHONPATH= \\
-        .venv/bin/python scripts/capture_impedance.py /dev/cu.usbserial-XXXX -n 3
+        .venv/bin/python scripts/capture_impedance.py /dev/cu.usbserial-XXXX --allow-undocumented-z -n 3
 
-诚实边界：本脚本只「发 z → 抓响应 → 打印 + best-effort 解析」，不下结论。判断
-「是否支持、阻抗值是否合理（干>100kΩ 报警）」需人看原始输出，别拿解析结果当实测。
+诚实边界：本脚本只「发 z → 抓响应 → 打印 + best-effort 解析」，不下结论。
+RT-BCI 当前协议资料没有 z；未被相应固件文档确认前不要启用该命令。解析数值也不代表
+完成了阻抗校准，不能直接拿阈值判断电极接触是否合格。
 """
 from __future__ import annotations
 
@@ -49,7 +51,14 @@ def main() -> int:
     ap.add_argument("-n", "--seconds", type=float, default=3.0)
     ap.add_argument("-c", "--channels", type=int, choices=(8, 16), default=16,
                     help="板卡通道数；默认 16（RT-BCI 双 ADS1299/Daisy）")
+    ap.add_argument("--allow-undocumented-z", action="store_true",
+                    help="显式允许发送未在 RT-BCI 协议中记录的 z 命令；仅用于已核实兼容的固件")
     args = ap.parse_args()
+
+    if not args.allow_undocumented_z:
+        print("已中止：RT-BCI 本地串口协议未记录 z 阻抗命令（仅列出 b、s、x…X）。")
+        print("先核实对应固件命令；ADS1299 芯片支持 LOFF 不代表板级固件已开放。")
+        return 3
 
     ports = list_ports()
     print("可用串口:")
