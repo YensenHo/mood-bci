@@ -262,7 +262,7 @@ class DiagnosticWizard(QMainWindow):
         else:
             subprocess.Popen([sys.executable, os.path.join(_runtime.app_root(), "main.py"),
                               config], cwd=_runtime.app_root())
-        self.log("采集窗口会单独弹出。看波形在动、质量面板大多绿色，就成了。")
+        self.log("采集窗口会单独弹出。绿色只表示未检出明显数据异常，不代表电极接触或电气安全已验证。")
 
     def log(self, text):
         self.log_box.appendPlainText(text)

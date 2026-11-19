@@ -38,6 +38,7 @@ class SignalChain:
         self._n_ch = None
         self._zi_bp = None
         self._zi_notch = None
+        self._needs_reset = None
 
     def _ensure_state(self, x: np.ndarray) -> None:
         n_ch = x.shape[0]
@@ -46,7 +47,9 @@ class SignalChain:
         self._n_ch = n_ch
         ns = self.sos_bp.shape[0]
         z = sosfilt_zi(self.sos_bp)                       # (ns, 2)
-        self._zi_bp = z[:, None, :] * x[None, :, 0, None]
+        first = np.where(np.isfinite(x[:, 0]), x[:, 0], 0.0)
+        self._zi_bp = z[:, None, :] * first[None, :, None]
+        self._needs_reset = ~np.isfinite(x[:, 0])
         self._zi_notch = []
         for b, a in self.notches:
             self._zi_notch.append(np.zeros((n_ch, 2)))
@@ -55,6 +58,7 @@ class SignalChain:
         self._n_ch = None
         self._zi_bp = None
         self._zi_notch = None
+        self._needs_reset = None
 
     def process(self, x) -> np.ndarray:
         """处理一块数据 x (n_ch, n) 或 (n,)，返回同形状的已滤波数据（µV）。"""
@@ -65,6 +69,28 @@ class SignalChain:
         if n == 0:
             return x.copy()
         self._ensure_state(x)
+
+        if not np.isfinite(x).all() or self._needs_reset.any():
+            # 单通道断点不污染其他通道；缺失样本保持 NaN，不伪造脑电。
+            out = np.full_like(x, np.nan)
+            for ch in range(n_ch):
+                valid = np.isfinite(x[ch])
+                edges = np.flatnonzero(np.diff(np.r_[False, valid, False].astype(np.int8)))
+                for start, end in zip(edges[::2], edges[1::2]):
+                    if start > 0 or self._needs_reset[ch]:
+                        self._zi_bp[:, ch, :] = sosfilt_zi(self.sos_bp) * x[ch, start]
+                        for zi in self._zi_notch:
+                            zi[ch, :] = 0
+                    y, state = sosfilt(self.sos_bp, x[ch:ch+1, start:end],
+                                       axis=1, zi=self._zi_bp[:, ch:ch+1, :])
+                    self._zi_bp[:, ch:ch+1, :] = state
+                    for i, (b, a) in enumerate(self.notches):
+                        y, state = lfilter(b, a, y, axis=1,
+                                           zi=self._zi_notch[i][ch:ch+1, :])
+                        self._zi_notch[i][ch:ch+1, :] = state
+                    out[ch, start:end] = y[0]
+                self._needs_reset[ch] = not valid[-1]
+            return out
 
         # 2) 带通 0.5–45 Hz（带状态，避免分块边界跳变）
         y, self._zi_bp = sosfilt(self.sos_bp, x, axis=1, zi=self._zi_bp)

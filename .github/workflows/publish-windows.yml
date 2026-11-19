@@ -1,0 +1,52 @@
+name: publish-windows-artifact
+on:
+  workflow_dispatch:
+    inputs:
+      tag:
+        description: Existing version tag
+        required: true
+        type: string
+      run_id:
+        description: Successful Windows build workflow run ID
+        required: true
+        type: string
+
+permissions:
+  actions: read
+  contents: write
+
+jobs:
+  publish-windows:
+    runs-on: ubuntu-latest
+    steps:
+      - name: Verify tag and Windows build
+        uses: actions/github-script@v7
+        with:
+          script: |
+            const {owner, repo} = context.repo;
+            const tag = context.payload.inputs.tag;
+            const runId = context.payload.inputs.run_id;
+            if (!/^v[0-9]+\.[0-9]+\.[0-9]+$/.test(tag) || !/^[0-9]+$/.test(runId)) {
+              core.setFailed('Invalid tag or run ID'); return;
+            }
+            const run = await github.rest.actions.getWorkflowRun({owner, repo, run_id: Number(runId)});
+            const commit = await github.rest.repos.getCommit({owner, repo, ref: tag});
+            const jobs = await github.paginate(github.rest.actions.listJobsForWorkflowRun, {owner, repo, run_id: Number(runId)});
+            if (run.data.head_sha !== commit.data.sha || !jobs.some(j => j.name === 'build-windows' && j.conclusion === 'success')) {
+              core.setFailed('Tag and successful Windows build do not match');
+            }
+      - uses: actions/download-artifact@v4
+        with:
+          name: eegscope-windows.zip
+          path: artifacts
+          run-id: ${{ inputs.run_id }}
+          github-token: ${{ secrets.GITHUB_TOKEN }}
+      - uses: softprops/action-gh-release@v2
+        with:
+          tag_name: ${{ inputs.tag }}
+          prerelease: true
+          files: artifacts/eegscope-windows.zip
+          body: |
+            测试版：自动排除明显饱和、平线和无效通道，NC/REF/GND 不参与指标；关键通道异常时停止相关指标。原始数据保留，质量快照写入 sync.json。
+
+            此初筛不是阻抗检测，不能发现所有异常，也不能去除共同干扰；真实设备及情绪推断仍需验证。

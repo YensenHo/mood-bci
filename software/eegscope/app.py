@@ -59,7 +59,7 @@ class MainWindow(QMainWindow):
         self.timer.start(cfg.viz.refresh_ms)
         self._frac = 0.0
         self._last_tick = time.monotonic()
-        # 原始数据缓冲（未滤波）：电极接触检测要看「打满/平线」，滤波会把直流去掉
+        # 原始数据缓冲（未滤波）：初筛平线、量程及数据完整性异常
         self._raw_hist = np.zeros((source.n_channels, 0), dtype=np.float64)
 
         # 会话录制状态（懒初始化，按下「录制」才建 SessionRecorder）
@@ -444,7 +444,7 @@ class MainWindow(QMainWindow):
             self.uploader.send(chunk)
         filtered = self.dsp.process(chunk)
         self.waveform.push(filtered)
-        # 累积原始数据（供电极接触检测），长度与波形窗一致
+        # 累积原始数据（供通道信号/数据完整性初筛），长度与波形窗一致
         self._raw_hist = np.concatenate([self._raw_hist, chunk], axis=1)
         raw_max = int(self.cfg.viz.window_seconds * self.cfg.sample_rate)
         if self._raw_hist.shape[1] > raw_max:
@@ -475,7 +475,8 @@ class MainWindow(QMainWindow):
         raw_win = self._raw_hist[:, -n_win:]
         quality = compute_channel_quality(raw_win, self.cfg.sample_rate,
                                           full_scale_uv=self.source.full_scale_uv)
-        valid = [r["status"] != "bad" and nm.strip().upper() not in ("NC", "", "REF", "GND")
+        # Only use channels that pass both signal and data-integrity screens.
+        valid = [r["status"] == "good" and nm.strip().upper() not in ("NC", "", "REF", "GND")
                  for r, nm in zip(quality, self.source.channel_names)]
         self.quality.update_quality(raw_win, quality)
         mask = tuple(valid)

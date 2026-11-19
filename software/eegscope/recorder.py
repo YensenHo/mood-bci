@@ -280,7 +280,7 @@ class SessionRecorder:
                                for log in self._frame_logs],
                 "gap_log": self._gap_log,
                 "channel_quality": self._quality_log,
-                "channel_quality_note": "分析窗口内按原始数据判断明显平线、量程饱和和非有限值；NC/REF/GND 不参与。未标坏不代表接触或信号质量已验证。",
+                "channel_quality_note": "分析窗口内按原始数据筛查平线、量程饱和、非有限值及疑似零值/重复值平台异常；可疑或明显异常通道均暂不纳入情绪特征计算。NC/REF/GND 不参与。未标异常不代表接触或信号质量已验证，数据异常不等于电极接触故障。",
                 "start_monotonic": self._start_monotonic,
                 "clock_note": (
                     "时钟说明：\n"

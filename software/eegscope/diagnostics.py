@@ -1,4 +1,4 @@
-"""64 通道调试的共用逻辑：扫描 / 校准 / 电极接触判定 / 摸电极识板 / 写 config。
+"""64 通道调试的共用逻辑：扫描 / 校准 / 通道状态初筛 / 摸电极识板 / 写 config。
 
 命令行脚本（scripts/detect_boards.py、scripts/identify_boards.py）和图形向导
 （eegscope/wizard.py）共用这一套，避免两处各写一份、改了这处忘了那处。

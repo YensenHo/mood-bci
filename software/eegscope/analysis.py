@@ -32,9 +32,11 @@ def welch_psd(sig, fs, nperseg=None):
     if sig.ndim == 1:
         sig = sig[None, :]
     n = sig.shape[1]
+    if n == 0:
+        raise ValueError("频谱输入不能为空")
     if nperseg is None:
         nperseg = int(min(fs, n))
-    nperseg = int(max(16, min(nperseg, n)))
+    nperseg = int(max(1, min(nperseg, n)))
     noverlap = nperseg // 2
     freqs, psd = welch(sig, fs=float(fs), nperseg=nperseg,
                        noverlap=noverlap, axis=1)
@@ -55,10 +57,21 @@ def detect_25hz_concentration(raw, fs, valid_channels):
     narrow = psd[:, (freqs >= 24) & (freqs <= 26)].sum(axis=1)
     ratios = np.divide(narrow, total, out=np.zeros_like(total), where=total > 0)
     fraction = float(np.mean(ratios > 0.5))
-    return {"available": True, "warning": fraction >= 0.5,
+    # 多板时，全体通道平均可能掩盖单组的共同窄带成分。
+    indices = np.flatnonzero(valid)
+    groups = []
+    for group in np.unique(indices // 16):
+        selected = ratios[indices // 16 == group]
+        if len(selected) >= 4:
+            grouped = float(np.mean(selected > 0.5))
+            groups.append({"file_row_group": int(group + 1), "n_channels": len(selected),
+                           "fraction_channels_over_half_power": grouped,
+                           "warning": grouped >= 0.5})
+    return {"available": True, "warning": fraction >= 0.5 or any(g["warning"] for g in groups),
             "fraction_channels_over_half_power": fraction,
             "n_channels": int(valid.sum()),
-            "note": "24–26 Hz 占 1–45 Hz 功率超过一半的通道比例；启发式筛查，非噪声来源诊断。"}
+            "groups": groups,
+            "note": "24–26 Hz 占 1–45 Hz 功率超过一半的通道比例；按文件行分组，启发式筛查，非噪声来源诊断。"}
 
 
 def band_power_map(data, fs, band_lo, band_hi):

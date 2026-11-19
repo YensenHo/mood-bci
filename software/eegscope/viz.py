@@ -8,7 +8,8 @@ import pyqtgraph as pg
 from PySide6.QtCore import QPointF, QRectF, Qt
 from PySide6.QtGui import QFont, QPolygonF
 from PySide6.QtWidgets import (QComboBox, QGraphicsPolygonItem, QGridLayout,
-                               QHBoxLayout, QLabel, QVBoxLayout, QWidget)
+                               QHBoxLayout, QLabel, QProgressBar, QVBoxLayout,
+                               QWidget)
 from scipy.interpolate import griddata
 from scipy.signal import spectrogram
 from scipy.spatial import QhullError
@@ -509,12 +510,7 @@ class TopographyPanel(QWidget):
 # =====================================================================
 
 class QualityPanel(QWidget):
-    """电极接触检测面板（傻子化设计）。
-
-    - 顶部大字总结：「✅ 64 个电极全部接触良好」或「⚠️ 5 个需调整」
-    - 第二行大白话指令：「请调整电极：F3、F4、O1」
-    - 通道用网格排布（64 通道 = 16 列 × 4 行），背景色=状态色，悬停看原因
-    """
+    """信号/数据完整性初筛 + 快速响应条；不测电极阻抗或接触质量。"""
 
     _STATUS_COLORS = {
         "good": "#2e7d32",
@@ -522,7 +518,11 @@ class QualityPanel(QWidget):
         "bad": "#c62828",
         "na": "#3a3a40",
     }
-    _STATUS_TEXT = {"good": "未检出明显异常", "warn": "待检查", "bad": "异常，已排除"}
+    _STATUS_TEXT = {
+        "good": "未检出明显数据异常",
+        "warn": "数据可疑，暂不参与分析",
+        "bad": "明显数据异常，已剔除",
+    }
 
     def __init__(self, channel_names, fs, full_scale_uv=None):
         super().__init__()
@@ -536,14 +536,14 @@ class QualityPanel(QWidget):
 
         # 标题 + 图例
         head = QHBoxLayout()
-        title = QLabel("通道信号初筛（非阻抗检测）")
+        title = QLabel("实时通道状态")
         title.setStyleSheet("font-weight: bold; font-size: 14px; color: #e0e0e0;")
         head.addWidget(title)
         head.addStretch(1)
         legend = QLabel(
-            '<span style="color:#4caf50">●</span> 未检出明显异常&nbsp;&nbsp;'
-            '<span style="color:#f9a825">●</span> 待检查&nbsp;&nbsp;'
-            '<span style="color:#c62828">●</span> 异常已排除')
+            '<span style="color:#4caf50">●</span> 正常&nbsp;&nbsp;'
+            '<span style="color:#f9a825">●</span> 待复核&nbsp;&nbsp;'
+            '<span style="color:#c62828">●</span> 已排除')
         legend.setStyleSheet("color: #aaa; font-size: 12px;")
         head.addWidget(legend)
         layout.addLayout(head)
@@ -553,6 +553,10 @@ class QualityPanel(QWidget):
         self.summary.setStyleSheet(
             "font-size: 14px; font-weight: bold; color: #999; padding: 2px;")
         layout.addWidget(self.summary)
+        note = QLabel("青色条显示近 1 秒信号波动，调整时会即时响应；波动大小不代表接触好坏，也不是阻抗测量。")
+        note.setWordWrap(True)
+        note.setStyleSheet("color: #aaa; font-size: 11px; padding: 1px;")
+        layout.addWidget(note)
 
         # 请调整清单（大白话指令）
         self.advice = QLabel("")
@@ -560,41 +564,84 @@ class QualityPanel(QWidget):
         self.advice.setStyleSheet("font-size: 12px; color: #f9a825; padding: 2px;")
         layout.addWidget(self.advice)
 
-        # 通道网格（多行，适配 64 通道）
+        # 通道卡片：状态色与信号活动条分开表达，不暗示接触质量。
         grid = QGridLayout()
-        grid.setSpacing(2)
+        grid.setSpacing(4)
         self._labels = []
+        self._activity_labels = []
+        self._activity_bars = []
+        self._activity_smooth = [None] * len(self.names)
         n = len(self.names)
-        cols = 16 if n > 16 else max(1, n)
+        cols = min(4 if n <= 16 else 8, max(1, n))
         for i, nm in enumerate(self.names):
+            cell = QWidget()
+            cell_layout = QVBoxLayout(cell)
+            cell_layout.setContentsMargins(4, 3, 4, 3)
+            cell_layout.setSpacing(2)
+            row = QHBoxLayout()
+            row.setContentsMargins(0, 0, 0, 0)
             lbl = QLabel(nm)
             lbl.setAlignment(Qt.AlignmentFlag.AlignCenter)
-            lbl.setFixedHeight(22)
-            lbl.setMinimumWidth(34)
+            lbl.setMinimumWidth(32)
             lbl.setStyleSheet(
                 f"background-color:{self._STATUS_COLORS['na']}; color:#e0e0e0;"
-                "font-size: 10px; border-radius: 3px;")
-            grid.addWidget(lbl, i // cols, i % cols)
+                "font-size: 10px; font-weight: bold; border-radius: 3px; padding: 2px;")
+            value = QLabel("— µV")
+            value.setAlignment(Qt.AlignmentFlag.AlignRight | Qt.AlignmentFlag.AlignVCenter)
+            value.setStyleSheet("color:#9aa8b7; font-size:9px;")
+            row.addWidget(lbl, 1)
+            row.addWidget(value)
+            cell_layout.addLayout(row)
+            bar = QProgressBar()
+            bar.setRange(0, 100)
+            bar.setValue(0)
+            bar.setTextVisible(False)
+            bar.setFixedHeight(5)
+            bar.setStyleSheet(
+                "QProgressBar{background:#252b33;border:0;border-radius:2px;}"
+                "QProgressBar::chunk{background:#31b6e8;border-radius:2px;}")
+            cell_layout.addWidget(bar)
+            cell.setStyleSheet("background:#171c23; border:1px solid #2c3540; border-radius:5px;")
+            grid.addWidget(cell, i // cols, i % cols)
             self._labels.append(lbl)
+            self._activity_labels.append(value)
+            self._activity_bars.append(bar)
         layout.addLayout(grid)
-        layout.addStretch(1)
 
     def update_quality(self, data, results=None) -> None:
         """用当前窗数据刷新总结 + 每通道状态（命名避开 QWidget.update()）。"""
         if results is None:
             results = compute_channel_quality(data, self.fs, full_scale_uv=self.full_scale_uv)
+        data = np.asarray(data, dtype=np.float64)
+        tail = data[:, -max(1, round(self.fs)):]
         good = warn = bad = 0
         bad_names, warn_names = [], []
-        for lbl, r, nm in zip(self._labels, results, self.names):
+        for i, (lbl, r, nm) in enumerate(zip(self._labels, results, self.names)):
+            signal = tail[i]
+            finite = signal[np.isfinite(signal)]
+            activity = float(np.std(finite)) if finite.size else 0.0
+            self._activity_labels[i].setText(f"{activity:.1f} µV")
+            level = np.clip((np.log10(max(activity, 0.05)) + 1.30103) / 6.0 * 100, 0, 100)
+            previous = self._activity_smooth[i]
+            smooth = float(level) if previous is None else 0.55 * float(level) + 0.45 * previous
+            self._activity_smooth[i] = smooth
+            self._activity_bars[i].setValue(round(smooth))
+            self._activity_bars[i].setToolTip(
+                f"近 1 秒标准差 {activity:.2f} µV；仅显示信号活动，不代表接触质量")
             if nm.strip().upper() in ("NC", "", "REF", "GND"):
                 lbl.setStyleSheet("background-color:#555; color:#ddd; font-size:10px;")
                 lbl.setToolTip(f"{nm} · 未纳入计算")
+                self._activity_bars[i].setEnabled(False)
+                self._activity_labels[i].setText("不分析")
                 continue
+            self._activity_bars[i].setEnabled(True)
             color = self._STATUS_COLORS.get(r["status"], self._STATUS_COLORS["na"])
             lbl.setStyleSheet(
                 f"background-color:{color}; color:#ffffff; font-size: 10px;"
                 "border-radius: 3px;")
             tip = self._STATUS_TEXT.get(r["status"], "未知")
+            tip += f"；近1秒波动={activity:.1f}µV"
+            tip += f"；零值={r.get('zero_fraction', 0.0) * 100:.1f}%"
             if r["reasons"]:
                 tip += "：" + "、".join(r["reasons"])
             lbl.setToolTip(f"{nm} · RMS={r['rms']:.1f}µV · {tip}")
@@ -616,16 +663,16 @@ class QualityPanel(QWidget):
             return
         need = bad_names + warn_names
         if not need:
-            self.summary.setText(f"{total} 个通道未发现明显异常（不等于接触已验证）")
+            self.summary.setText(f"{total} 个通道未检出明显数据异常（接触未验证）")
             self.summary.setStyleSheet(
                 "font-size: 14px; font-weight: bold; color: #4caf50; padding: 2px;")
             self.advice.setText("")
         else:
             self.summary.setText(
-                f"⚠️ {good}/{total} 未检出明显异常 · {warn} 待检查 · {bad} 异常已排除")
+                f"⚠️ {good}/{total} 可用 · {warn} 可疑暂不分析 · {bad} 明显异常已剔除")
             self.summary.setStyleSheet(
                 "font-size: 14px; font-weight: bold; color: #f9a825; padding: 2px;")
-            self.advice.setText("请检查通道：" + "、".join(need))
+            self.advice.setText("建议复核通道数据/采集链路：" + "、".join(need))
 
 
 # =====================================================================
