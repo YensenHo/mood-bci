@@ -15,6 +15,7 @@ from PySide6.QtWidgets import (QApplication, QComboBox, QHBoxLayout, QLabel,
 from . import _runtime
 from .analysis import (BaselineCalibrator, EmotionAnalyzer, band_power_map,
                        detect_25hz_concentration, welch_psd)
+from .artifacts import detect_artifacts
 from .dsp import SignalChain
 from .recorder import SessionRecorder, config_snapshot
 from .remote import StreamUploader
@@ -486,6 +487,9 @@ class MainWindow(QMainWindow):
             self.calibrator.reset()
         self._last_valid_channels = mask
         metrics = self.analyzer.analyze(data, valid_channels=valid)
+        artifacts = detect_artifacts(data, self.cfg.sample_rate,
+                                     self.source.channel_names, valid)
+        self._last_artifacts = artifacts
         interference = detect_25hz_concentration(raw_win, self.cfg.sample_rate, valid)
         if self.recorder is not None and self.recorder.is_recording:
             reasons = [(["预留或参考通道"] if nm.strip().upper() in ("NC", "", "REF", "GND")
@@ -496,7 +500,7 @@ class MainWindow(QMainWindow):
         if self._integrity_warning:
             metrics = self.analyzer._empty_result()
             metrics["note"] = self._integrity_warning
-        if self._baseline_mode and not interference["warning"] and not self._integrity_warning:
+        if self._baseline_mode and artifacts["clean"] and not interference["warning"] and not self._integrity_warning:
             self.calibrator.add_sample(metrics)
         if self.calibrator.calibrated:
             metrics = self.calibrator.zscore(metrics)
@@ -506,7 +510,7 @@ class MainWindow(QMainWindow):
             metrics["valence"] = None
         if not self.calibrator.has_calibration("arousal"):
             metrics["arousal"] = None
-        if interference["warning"] or self._integrity_warning:
+        if interference["warning"] or self._integrity_warning or not artifacts["clean"]:
             metrics["valence"] = None
             metrics["arousal"] = None
 
@@ -558,6 +562,12 @@ class MainWindow(QMainWindow):
         if self._integrity_warning:
             self.info_label.setToolTip("")
             self.info_label.setText("警告：" + self._integrity_warning + "；本次录制指标暂停")
+        elif not artifacts["clean"]:
+            self.info_label.setText("检测到伪迹：" + "、".join(artifacts["reasons"]))
+            self.info_label.setToolTip(
+                "眨眼/肌电/运动/跳变等伪迹会让 FAA、投入度等情绪指标不可靠。"
+                "当前窗口指标已暂停（不进入基线、不显示效价/唤醒度）。"
+            )
         elif interference["warning"]:
             n_valid = interference.get("n_channels", 0)
             fraction = interference.get("fraction_channels_over_half_power", 0.0)

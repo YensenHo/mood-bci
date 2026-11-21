@@ -34,6 +34,7 @@ sys.path.insert(0, os.path.dirname(os.path.dirname(os.path.abspath(__file__))))
 import numpy as np
 
 from eegscope.analysis import DEFAULT_BANDS, EmotionAnalyzer, detect_25hz_concentration
+from eegscope.artifacts import detect_artifacts
 from eegscope.dsp import SignalChain
 from eegscope.quality import compute_channel_quality
 
@@ -145,7 +146,7 @@ def run(rec_dir: str, window_sec: float, step_sec: float) -> int:
     valence = []
     arousal = []
     band_power = {b: [] for b in bands}
-    bad_counts, noise_flags = [], []
+    bad_counts, noise_flags, artifact_flags = [], [], []
 
     for s0 in starts:
         win_data = sig[:, s0:s0 + win]
@@ -159,10 +160,12 @@ def run(rec_dir: str, window_sec: float, step_sec: float) -> int:
             valid = [False] * n_ch  # 滤波后无法可靠识别原始饱和。
             interference = {'warning': False, 'available': False}
         m = analyzer.analyze(win_data, valid)
-        if mapping_unverified or integrity_warnings or interference['warning']:
+        artifacts = detect_artifacts(win_data, fs, channel_names, valid)
+        if mapping_unverified or integrity_warnings or interference['warning'] or not artifacts['clean']:
             m['faa'], m['faa_ok'] = None, False
         bad_counts.append(sum(not v for v in valid))
         noise_flags.append(bool(interference['warning']))
+        artifact_flags.append(not artifacts['clean'])
         center = (s0 + win / 2.0) / fs
         t_axis.append(center)
         faa.append(m["faa"] if m["faa_ok"] and m["faa"] is not None else np.nan)
@@ -194,6 +197,7 @@ def run(rec_dir: str, window_sec: float, step_sec: float) -> int:
         band_power=bp,
         excluded_channels=np.asarray(bad_counts),
         interference_25hz=np.asarray(noise_flags),
+        artifact_flags=np.asarray(artifact_flags, dtype=bool),
     )
 
     # 汇总真实数字
@@ -215,6 +219,7 @@ def run(rec_dir: str, window_sec: float, step_sec: float) -> int:
     lines.append(f"- **数据来源**：{used}（通道名：{', '.join(channel_names)}）")
     lines.append(f"- **marker 数量**：{len(markers)}")
     lines.append(f"- **25 Hz 成分异常集中**：{sum(noise_flags)}/{len(noise_flags)} 窗（启发式，不能确定来源）")
+    lines.append(f"- **伪迹（眨眼/肌电/运动/跳变）**：{sum(artifact_flags)}/{len(artifact_flags)} 窗（这些窗 FAA 已停用）")
     lines.append("- **效价/唤醒度**：未载入有效个人基线，已停用。")
     if mapping_unverified:
         lines.append("- **警告**：硬件通道映射或记录版本未验证，FAA 已停用。")
