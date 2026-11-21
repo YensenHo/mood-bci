@@ -6,8 +6,14 @@ from .analysis import welch_psd
 def compute_channel_quality(data, fs, *, full_scale_uv=None,
                             rms_lo_warn=1.0, flat_std=0.05,
                             railed_rms=150000.0, sat_uv=195.0,
-                            sat_ratio=1e-3, mains_hz=50.0):
-    """按原始窗口初筛信号和数据完整性异常，不诊断电极接触。"""
+                            sat_ratio=1e-3, mains_hz=50.0,
+                            mains_warn_uv2_hz=10000.0):
+    """按原始窗口初筛信号和数据完整性异常，不诊断电极接触。
+
+    mains_warn_uv2_hz：50Hz 工频告警阈值（µV²/Hz）。RLD 右腿驱动未生效时
+    工频共模会把信号淹没（实测 ~150k µV²/Hz）；RLD 修复后降到 ~700 µV²/Hz。
+    超过阈值则提示「50Hz 工频偏高，RLD 可能未生效」。
+    """
     data = np.asarray(data, dtype=np.float64)
     if data.ndim == 1:
         data = data[None, :]
@@ -60,6 +66,9 @@ def compute_channel_quality(data, fs, *, full_scale_uv=None,
                 f"数据完整性需复核：零值 {zero_fraction * 100:.1f}% / "
                 f"最长零值段 {zero_run / fs:.2f}s / 重复值平台 {repeated_run / fs:.2f}s"
             )
+        if mains > mains_warn_uv2_hz:
+            sev = max(sev, 1)
+            reasons.append(f"50Hz 工频偏高 ({mains:.0f} µV²/Hz)，RLD 可能未生效")
         # 其余 = 未检出明显异常；仍不代表接触或脑电质量已验证。
 
         status = {0: "good", 1: "warn", 2: "bad"}[sev]
