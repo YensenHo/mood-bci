@@ -1,0 +1,12 @@
+# 工具链（1GB，不进 git）
+toolchain/
+
+# 原厂固件备份（本地保留，回退用，不进 git）
+backup/
+backups/
+
+# 嵌套 git 仓库（RT_BCI_1299 有自己的仓库，已单独提交 RLD 改动）
+RT_BCI_1299/
+
+# 旧的无后缀合并补丁（用 _123 / _4 两个版本）
+build_rld_patched.bin
